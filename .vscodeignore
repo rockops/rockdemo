@@ -1,0 +1,14 @@
+# Dev-only material — kept out of the published package (lean build)
+.git/**
+.gitignore
+.vscode/**
+.claude/**
+.rockdemo-run/**
+
+# Sample content (live tryout material) — excluded from the lean package
+scenarios/**
+example/**
+
+# Misc
+**/*.vsix
+.vscodeignore

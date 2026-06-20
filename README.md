@@ -165,7 +165,7 @@ container, so scenario scripts are available to run (and `foreground` commands
   The scratch dir is re-created fresh on every open/RESTART and **deleted when
   the demo ends** (stop/close). It's gitignored (`.rockdemo-run/`).
 
-A working example lives in [scenarios/simple/index.json](scenarios/simple/index.json).
+A working example lives in [scenarios/simple/index.json](https://github.com/rockops/rockdemo/blob/main/scenarios/simple/index.json).
 
 ## Project layout
 
@@ -178,7 +178,7 @@ rockdemo/
 └── README.md
 ```
 
-The implementation lives entirely in [src/extension.js](src/extension.js):
+The implementation lives entirely in [src/extension.js](https://github.com/rockops/rockdemo/blob/main/src/extension.js):
 
 - `parseScenario(document)` — line-based parser that walks the markdown,
   tracking fence open/close and extracting `{ openLine, action, lang, content }`
@@ -213,11 +213,11 @@ second VS Code window that loads rockDemo from source.
    folder (open the folder itself, not its parent).
 2. **Launch the dev host** — press **F5**, or open the **Run and Debug** panel
    (`Ctrl/Cmd+Shift+D`) and choose **"Run rockDemo Extension"**, then click the
-   green ▶. This config is defined in [.vscode/launch.json](.vscode/launch.json)
+   green ▶. This config is defined in [.vscode/launch.json](https://github.com/rockops/rockdemo/blob/main/.vscode/launch.json)
    and starts a new window titled **[Extension Development Host]** with rockDemo
    active.
 3. **Open a scenario** — in the new window, open
-   [example/scenario.md](example/scenario.md).
+   [example/scenario.md](https://github.com/rockops/rockdemo/blob/main/example/scenario.md).
 4. **Edit mode** — CodeLens links (**▶ Run in terminal / 📋 Copy /
    📂 Open file**) appear above each code block. Click them and watch:
    - **Step 1** (`bash`, no annotation) → runs in the terminal.
@@ -230,7 +230,7 @@ second VS Code window that loads rockDemo from source.
    the editor with the markdown rendered, the ` ```bash ` fences hidden, and a
    button under each command. Click a button → it runs/copies/opens just like
    edit mode. Edit or save the source and the demo panel updates live.
-6. **Scenario mode** — open [scenarios/simple/index.json](scenarios/simple/index.json)
+6. **Scenario mode** — open [scenarios/simple/index.json](https://github.com/rockops/rockdemo/blob/main/scenarios/simple/index.json)
    and click **▶ Run demo**. You'll see the intro (title + description +
    **START**), and a `rockDemo` terminal opens running
    `docker run -it --rm alpine sh` (needs Docker installed and running). Click
@@ -239,7 +239,7 @@ second VS Code window that loads rockDemo from source.
 
 ### Iterating on changes
 
-After editing [src/extension.js](src/extension.js), reload the Extension
+After editing [src/extension.js](https://github.com/rockops/rockdemo/blob/main/src/extension.js), reload the Extension
 Development Host to pick up the change: focus that window and run **Developer:
 Reload Window** (`Ctrl/Cmd+R`), or stop and re-launch with F5. If CodeLens
 buttons don't appear, confirm:

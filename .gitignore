@@ -1,0 +1,11 @@
+# Built extension packages
+*.vsix
+
+# rockDemo per-run scratch (staged asset copies, bind-mounted into containers)
+.rockdemo-run/
+
+# Node
+node_modules/
+
+# Editor/OS noise
+.DS_Store
