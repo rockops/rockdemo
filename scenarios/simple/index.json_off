@@ -1,0 +1,33 @@
+{
+    "title": "Découverte de kubectl",
+    "description": "Mes premiers pas avec kubectl",
+    "details": {
+      "intro": {
+        "text": "intro.md",
+        "background": "background.sh"
+      },
+      "steps": [
+        {
+          "title": "Premieres commandes",
+          "text": "step1/step1.md",
+          "verify": "step1/verify.sh"
+        },
+        {
+          "title": "Création d'une ressource",
+          "text": "step2/step2.md",
+          "verify": "step2/verify.sh"
+        }
+      ],
+      "assets": {
+        "host01": [
+          {"file": "solution*", "target": "/var/killercoda/solution","chmod":"+w"}
+        ]
+      },
+      "finish": {
+        "text": "finish.md"
+      }
+    },
+    "backend": {
+      "imageid": "kubernetes-kubeadm-1node"
+    }
+}

@@ -1,0 +1,85 @@
+{
+  "name": "rockdemo",
+  "displayName": "rockDemo",
+  "description": "Run Killercoda-style markdown scenarios as live demos in VS Code.",
+  "version": "0.0.1",
+  "publisher": "rockdemo",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:markdown"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rockdemo.exec",
+        "title": "rockDemo: Run in terminal"
+      },
+      {
+        "command": "rockdemo.copy",
+        "title": "rockDemo: Copy command"
+      },
+      {
+        "command": "rockdemo.open",
+        "title": "rockDemo: Open file"
+      },
+      {
+        "command": "rockdemo.preview",
+        "title": "rockDemo: Run demo",
+        "icon": "$(play-circle)"
+      },
+      {
+        "command": "rockdemo.stop",
+        "title": "rockDemo: Stop demo",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "rockdemo.preview",
+          "when": "editorLangId == markdown && !rockdemo.scenarioRunning",
+          "group": "navigation@-1"
+        },
+        {
+          "command": "rockdemo.preview",
+          "when": "resourceFilename == index.json && !rockdemo.scenarioRunning",
+          "group": "navigation@-1"
+        },
+        {
+          "command": "rockdemo.stop",
+          "when": "rockdemo.scenarioRunning",
+          "group": "navigation@-1"
+        },
+        {
+          "command": "rockdemo.stop",
+          "when": "activeWebviewPanelId == 'rockdemo.demo'",
+          "group": "navigation@-1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "rockdemo.exec",
+          "when": "false"
+        },
+        {
+          "command": "rockdemo.copy",
+          "when": "false"
+        },
+        {
+          "command": "rockdemo.open",
+          "when": "false"
+        },
+        {
+          "command": "rockdemo.stop",
+          "when": "false"
+        }
+      ]
+    }
+  }
+}
