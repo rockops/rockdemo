@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write # needed to create the GitHub Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Guard: the tag (without the leading "v") must equal package.json version.
+      # Catches the classic "tagged v1.4.0 but package.json still says 1.3.0".
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag $TAG does not match package.json version $PKG"
+            exit 1
+          fi
+
+      # Channel convention: even minor = stable, odd minor = pre-release.
+      - name: Decide release channel from minor parity
+        id: ch
+        run: |
+          MINOR=$(node -p "require('./package.json').version.split('.')[1]")
+          if [ $((MINOR % 2)) -eq 1 ]; then
+            echo "flag=--pre-release" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to VS Code Marketplace
+        run: npx --yes @vscode/vsce publish ${{ steps.ch.outputs.flag }} -p "$VSCE_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Create GitHub Release and attach the .vsix
+        run: |
+          npx --yes @vscode/vsce package ${{ steps.ch.outputs.flag }} -o "rockdemo-${GITHUB_REF_NAME}.vsix"
+          PRE=""
+          if [ "${{ steps.ch.outputs.prerelease }}" = "true" ]; then PRE="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" "rockdemo-${GITHUB_REF_NAME}.vsix" \
+            --title "$GITHUB_REF_NAME" --generate-notes $PRE
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

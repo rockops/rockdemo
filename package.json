@@ -3,7 +3,24 @@
   "displayName": "rockDemo",
   "description": "Run Killercoda-style markdown scenarios as live demos in VS Code.",
   "version": "0.0.1",
-  "publisher": "rockdemo",
+  "publisher": "RockOps",
+  "license": "Apache-2.0",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rockops/rockdemo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rockops/rockdemo/issues"
+  },
+  "homepage": "https://github.com/rockops/rockdemo#readme",
+  "keywords": [
+    "killercoda",
+    "demo",
+    "markdown",
+    "tutorial",
+    "docker"
+  ],
   "engines": {
     "vscode": "^1.75.0"
   },
