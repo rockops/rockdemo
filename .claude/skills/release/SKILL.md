@@ -6,9 +6,9 @@ description: Release the rockDemo extension to the VS Code Marketplace by bumpin
 # Release rockDemo to the Marketplace
 
 Standardize cutting a release. Publishing is **tag-driven**: pushing a `vX.Y.Z`
-tag fires [.github/workflows/release.yml](../../.github/workflows/release.yml),
+tag fires [.github/workflows/release.yml](../../../.github/workflows/release.yml),
 which verifies the tag, runs `vsce publish`, and creates a GitHub Release. Full
-reference: [BUILD.md](../../BUILD.md).
+reference: [BUILD.md](../../../BUILD.md).
 
 > A release publishes to the Marketplace — it is **outward-facing and a version
 > number is burned forever**. Confirm the version and channel with the user

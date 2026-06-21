@@ -6,9 +6,9 @@ description: Open a pull request for the rockDemo extension from the current dev
 # Open a Pull Request (rockDemo)
 
 Standardize opening a PR from the **current working branch** into `main`. The CI
-workflow ([.github/workflows/ci.yml](../../.github/workflows/ci.yml)) packages the
+workflow ([.github/workflows/ci.yml](../../../.github/workflows/ci.yml)) packages the
 `.vsix` on every PR — it **builds only, never publishes**. See
-[BUILD.md](../../BUILD.md) for the overall flow.
+[BUILD.md](../../../BUILD.md) for the overall flow.
 
 ## Preconditions to verify (in order)
 
