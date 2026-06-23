@@ -22,7 +22,7 @@ jobs:
   build-push:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # GHCR image names must be lowercase; the owner ("rockops") already is,
       # but lowercasing keeps this correct for forks under any-cased orgs.
