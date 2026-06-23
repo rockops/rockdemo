@@ -8,6 +8,7 @@
 # Sample content (live tryout material) — excluded from the lean package
 scenarios/**
 example/**
+scenario-examples/**
 
 # Misc
 **/*.vsix

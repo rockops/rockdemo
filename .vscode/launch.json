@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run rockDemo Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "${workspaceFolder}/scenarios/simple"
+      ],
+      "outFiles": ["${workspaceFolder}/src/**/*.js"]
+    }
+  ]
+}
