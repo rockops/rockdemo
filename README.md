@@ -144,7 +144,7 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
   "backendExtended": {
     "nodes": {
       "host1": { "imageid": "alpine", "cmd": "sh", "ip": "172.30.1.2" },
-      "host2": { "imageid": "ghcr.io/rockops/ubuntu:24.04", "cmd": "bash", "ip": "172.30.2.2", "docker": true }
+      "host2": { "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "cmd": "bash", "ip": "172.30.2.2", "docker": true }
     }
   }
 }
@@ -236,7 +236,7 @@ the same shape as a `backendExtended` block:
 
 ```json
 {
-  "ubuntu": { "nodes": { "node1": { "imageid": "ghcr.io/rockops/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true } } },
+  "ubuntu": { "nodes": { "node1": { "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true } } },
   "alpine": { "nodes": { "node1": { "imageid": "alpine", "ip": "172.30.1.2", "cmd": "sh" } } }
 }
 ```
@@ -265,7 +265,7 @@ plus `curl`, `wget`, `telnet`, `docker.io`, and `podman`, with `WORKDIR /root`.
 
 The image is published to the **GitHub Container Registry** by
 [.github/workflows/docker-image.yml](.github/workflows/docker-image.yml) as
-`ghcr.io/rockops/ubuntu:24.04` (and `:latest`). The workflow runs on pushes to
+`ghcr.io/rockops/rockdemo/ubuntu:24.04` (and `:latest`). The workflow runs on pushes to
 `main` that touch `docker/ubuntu/**`, and can also be triggered manually from the
 Actions tab. It authenticates with the built-in `GITHUB_TOKEN`, so there are no
 secrets to configure. Docker pulls the public image automatically the first time
@@ -275,7 +275,7 @@ To build it locally instead (tag must match the `imageid` in
 `config/backends.json`):
 
 ```bash
-docker build -t ghcr.io/rockops/ubuntu:24.04 docker/ubuntu
+docker build -t ghcr.io/rockops/rockdemo/ubuntu:24.04 docker/ubuntu
 ```
 
 > The GHCR package must be **public** for an unauthenticated `docker pull` to

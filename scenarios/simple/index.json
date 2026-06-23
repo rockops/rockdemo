@@ -52,7 +52,7 @@
             "ip": "172.30.1.2"
         },
         "host2": {
-            "imageid": "ghcr.io/rockops/ubuntu:24.04",
+            "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04",
             "cmd": "bash",
             "ip": "172.30.2.2"
         }

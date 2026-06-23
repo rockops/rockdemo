@@ -2,10 +2,10 @@
 # pre-installing the tooling those scenarios assume is present.
 #
 # Published to GHCR by .github/workflows/docker-image.yml as
-# ghcr.io/rockops/ubuntu:24.04 (the imageid used in config/backends.json).
+# ghcr.io/rockops/rockdemo/ubuntu:24.04 (the imageid used in config/backends.json).
 #
 # Build locally (tag must match that imageid):
-#   docker build -t ghcr.io/rockops/ubuntu:24.04 docker/ubuntu
+#   docker build -t ghcr.io/rockops/rockdemo/ubuntu:24.04 docker/ubuntu
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
