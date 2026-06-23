@@ -9,3 +9,10 @@ node_modules/
 
 # Editor/OS noise
 .DS_Store
+
+# Local Claude Code settings (personal, not shared)
+.claude/settings.local.json
+
+# External reference clone (github.com/killercoda/scenario-examples), not part
+# of this repo — kept locally for authoring reference only.
+scenario-examples/

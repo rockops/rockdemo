@@ -6,7 +6,7 @@
         "text": "intro.md",
         "background": "background.sh",
         "foreground": "foreground.sh",
-        "host": "host02"
+        "host": "host2"
       },
       "steps": [
         {
@@ -14,14 +14,14 @@
           "text": "step1/step1.md",
           "background": "sh background.sh",
           "foreground": "sh foreground.sh",
-          "host": "host01",
+          "host": "host1",
           "verify": "step1/verify.sh"
         },
         {
           "title": "Création d'une ressource",
           "text": "step2/step2.md",
           "foreground": "foreground.sh",
-          "host": "host02",
+          "host": "host2",
           "verify": "step2/verify.sh"
         }
       ],
@@ -46,11 +46,15 @@
     },
     "backendExtended": {
       "nodes": {
-        "host01": {
-            "imageid": "alpine"
+        "host1": {
+            "imageid": "alpine",
+            "cmd": "sh",
+            "ip": "172.30.1.2"
         },
-        "host02": {
-            "imageid": "debian"
+        "host2": {
+            "imageid": "ghcr.io/rockops/ubuntu:24.04",
+            "cmd": "bash",
+            "ip": "172.30.2.2"
         }
       }
     }

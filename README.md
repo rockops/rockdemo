@@ -1,10 +1,10 @@
 # rockDemo
 
 A VS Code extension that turns [Killercoda](https://killercoda.com)-style
-markdown scenarios into live, clickable demos. It scans fenced code blocks in
-any open markdown file and renders **CodeLens buttons** directly above each
-actionable block, so you can drive a live demo without copy-pasting commands by
-hand.
+markdown scenarios into live, clickable demos. It renders **CodeLens buttons**
+above actionable code blocks in any markdown file, and can run full multi-step,
+**Docker-backed** scenarios from an `index.json` — so you can drive a live demo
+without copy-pasting commands by hand.
 
 ## What it does
 
@@ -15,11 +15,39 @@ block:
 | Annotation | Buttons shown | Behaviour |
 | --- | --- | --- |
 | `{{exec}}` | **▶ Run in terminal** + **📋 Copy** | Sends the command to the active terminal and presses Enter |
+| `{{exec interrupt}}` | **▶ Run** + **📋 Copy** | Sends **Ctrl+C** to the terminal first, then runs the command |
 | `{{copy}}` | **📋 Copy** | Copies the command to the clipboard (does *not* run it) |
 | `{{open}}` | **📂 Open file** | Opens the referenced file, path resolved relative to the scenario |
 
 As in Killercoda, **`bash` / `sh` / `shell` blocks are runnable by default** —
 they get the `exec` buttons even without an explicit `{{exec}}` annotation.
+
+### Inline code (single backticks)
+
+Inside the demo/scenario webview, **inline `` `code` `` spans are copyable by
+default** (Killercoda-style). A trailing `{{…}}` annotation overrides this:
+
+| Markdown | Result |
+| --- | --- |
+| `` `cmd` `` | 📋 copy icon (default) |
+| `` `cmd`{{}} `` | plain text, no icon (copy disabled) |
+| `` `cmd`{{exec}} `` | ▶ run + 📋 copy icons |
+| `` `cmd`{{exec interrupt}} `` | ▶ run (sends Ctrl+C first) + 📋 copy |
+| `` `cmd`{{copy}} `` | 📋 copy icon |
+
+### Markdown rendering
+
+The webview uses a small zero-dependency markdown renderer that also supports:
+
+- **HTML passthrough** — an allow-list of inline/block tags (`<br>`, `<kbd>`,
+  `<img>`, `<div>`, `<table>`, `<details>`, headings, lists, etc.) is emitted
+  verbatim instead of being escaped, so author HTML renders as intended.
+- **Blockquotes** — lines starting with `>` render as `<blockquote>`.
+- **Syntax highlighting** — fenced code blocks are syntax-coloured with a
+  **vendored** copy of [highlight.js](https://highlightjs.org/) (see
+  [Third-party notices](#third-party-notices)). The theme follows the editor's
+  light/dark preference. A highlight spec on the info string
+  (e.g. ` ```js {2,5-6} `) shades those lines.
 
 ### Two modes
 
@@ -27,10 +55,10 @@ they get the `exec` buttons even without an explicit `{{exec}}` annotation.
   actionable block (great while authoring a scenario).
 - **Demo / preview mode** — click the **▶ Run demo** button in the editor
   title bar (next to VS Code's own preview button, shown for any markdown
-  file). This opens a dedicated **Webview** beside the editor that renders the
-  markdown like a normal preview, **hides the meta fences** (` ```bash ` etc.),
-  and replaces each actionable block with clickable buttons. The panel
-  auto-refreshes as you edit or save the source file.
+  file). This opens a dedicated **Webview** that renders the markdown like a
+  preview, **hides the meta fences** (` ```bash ` etc.), and replaces each
+  actionable block with clickable buttons. The panel auto-refreshes as you edit
+  or save the source file.
 
   > rockDemo uses its own webview rather than VS Code's built-in markdown
   > preview on purpose: the built-in preview renders content as *untrusted*,
@@ -39,7 +67,8 @@ they get the `exec` buttons even without an explicit `{{exec}}` annotation.
 
 - **▶ Run in terminal** reuses the active terminal if one exists, otherwise
   creates a terminal named `rockDemo`. The command is typed *and* executed
-  (a trailing newline is sent).
+  (a trailing newline is sent). In scenario mode it targets the active node's
+  container shell instead.
 - **📋 Copy** writes the command to the system clipboard and shows a
   confirmation notification.
 - **📂 Open file** opens the referenced file in the editor. In a scenario, if
@@ -54,28 +83,29 @@ A full scenario is described by an `index.json` (Killercoda-style). Open it and
 click **▶ Run demo** in the title bar to launch the **scenario player**:
 
 1. An **intro screen** shows the scenario `title` and `description` with a
-   **START** button at the bottom. If `details.intro.text` is set, that
-   markdown file is rendered into the intro (via the demo player, so its
-   `{{exec}}`/`{{copy}}`/`{{open}}` buttons work).
+   **START** button. If `details.intro.text` is set, that markdown file is
+   rendered into the intro (with working `{{exec}}`/`{{copy}}`/`{{open}}`
+   buttons).
 2. On open, rockDemo starts an interactive shell in a Docker container for each
-   node — effectively `docker run -it --rm <imageid> sh`. **Docker is a
-   prerequisite.** `{{exec}}` commands run *inside* the active node's container.
-   - With a single `backend.imageid`, one terminal named `rockDemo` is opened.
+   node. **Docker is a prerequisite.** `{{exec}}` commands run *inside* the
+   active node's container.
+   - With a single `backend.imageid`, the image id is looked up in the bundled
+     default profiles (see [Backends](#backends)).
    - With `backendExtended.nodes`, **one terminal per node** is opened, each
-     named after its node key (e.g. `node1`, `node2`). `backendExtended` takes
-     precedence over `backend` when present.
+     named after its node key. `backendExtended` takes precedence over
+     `backend` when present.
 3. Clicking **START** walks through `details.steps` in order. Each step's
-   markdown (`text` file) is rendered with the same demo player (hidden meta
-   fences, clickable buttons), and gets navigation at the bottom:
-   - **PREV** — except on the first step,
-   - **NEXT** — on every step but the last,
-   - **FINISH** — on the last step (instead of NEXT).
-4. If `details.finish.text` is present, FINISH shows that final screen;
+   markdown is rendered with the demo player and gets navigation at the bottom
+   (**PREV** / **NEXT**, or **FINISH** on the last step). NEXT/FINISH may be
+   **gated** — see [Gating](#step-gating-verify--foreground).
+4. If `details.finish.text` is present, the end screen shows that markdown;
    otherwise it reports completion.
-5. The finish screen has a **RESTART** button: it disposes **all** node
-   container shells (their `--rm` containers are removed), relaunches every one
-   from scratch, and jumps back to step 1 — a clean start. Closing the player
-   also tears down all of its container shells.
+5. The **end screen** always has two buttons:
+   - **⟲ RESTART** (green) — tears down **all** node containers, relaunches
+     every one from scratch, and rebuilds the player back at the **intro
+     screen** (a fully clean start, with all gates reset).
+   - **✖ CLOSE** (red) — ends the scenario and tears down all containers (like
+     the **STOP** title-bar button).
 
 The player auto-rebuilds when you save the `index.json` or any step markdown.
 
@@ -86,123 +116,252 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
   "title": "Découverte de kubectl",
   "description": "Mes premiers pas avec kubectl",
   "details": {
+    "intro": {
+      "text": "intro.md",
+      "background": "background.sh",
+      "foreground": "foreground.sh",
+      "host": "host2"
+    },
     "steps": [
-      { "title": "Premieres commandes", "text": "step1/step1.md" },
-      { "title": "Création d'une ressource", "text": "step2/step2.md" }
+      {
+        "title": "Premieres commandes",
+        "text": "step1/step1.md",
+        "background": "sh background.sh",
+        "foreground": "sh foreground.sh",
+        "verify": "step1/verify.sh",
+        "host": "host1"
+      },
+      { "title": "Création d'une ressource", "text": "step2/step2.md", "host": "host2" }
     ],
     "assets": {
-      "node1": [
+      "host1": [
         { "file": "solution*", "target": "/var/killercoda/solution", "chmod": "+w" }
       ]
     },
     "finish": { "text": "finish.md" }
   },
-  "backend": { "imageid": "alpine" },
+  "backend": { "imageid": "ubuntu" },
   "backendExtended": {
     "nodes": {
-      "node1": { "imageid": "alpine" },
-      "node2": { "imageid": "debian" }
+      "host1": { "imageid": "alpine", "cmd": "sh", "ip": "172.30.1.2" },
+      "host2": { "imageid": "ghcr.io/rockops/ubuntu:24.04", "cmd": "bash", "ip": "172.30.2.2", "docker": true }
     }
   }
 }
 ```
 
+#### Top-level
+
 - `title` / `description` — shown on the intro screen.
-- `details.steps[].title` — step heading; `details.steps[].text` — markdown
-  file (path relative to `index.json`) rendered as the step body.
-- `details.finish.text` — optional closing screen.
-- `backend.imageid` — Docker image for a single-container scenario.
-- `backendExtended.nodes` — optional multi-container map; each key is a node
-  name (used as the terminal name) with its own `imageid`. When present, this
-  replaces `backend`.
-- `details.intro.background` / `details.steps[].background` — optional. A shell
-  command, or a script file (path relative to `index.json`, e.g.
+- `backend.imageid` — a **key** into the bundled default profiles
+  (see [Backends](#backends)).
+- `backendExtended.nodes` — explicit multi-container map; **takes precedence**
+  over `backend` when present. Each key is a node name (used as the terminal
+  name, container hostname, and `host:` selector).
+
+#### Per-node fields (both `backends.json` profiles and `backendExtended`)
+
+| Field | Meaning |
+| --- | --- |
+| `imageid` | Docker image to run for this node. |
+| `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
+| `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
+| `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
+
+The node name becomes the container **hostname** (visible in the shell prompt).
+
+#### `details.steps[]` / `details.intro`
+
+- `text` — markdown file (path relative to `index.json`) rendered as the body.
+- `background` — optional. A shell command, or a script file (e.g.
   `background.sh`), run **detached and hidden** inside a node's container (via
-  `docker exec`, so nothing shows in the terminal) when the screen is entered
-  (intro on open; a step when you navigate to it — once per run). Requires
-  `docker` on the extension host's PATH. stdout + stderr are captured to
-  `/var/log/rockdemo/<scenario>/<step>_background.log` inside the container,
-  where `<scenario>` is the scenario folder name and `<step>` is `intro` or the
-  1-based step number.
-- `details.intro.foreground` / `details.steps[].foreground` — optional. A
-  **single-line command** sent verbatim to the node's terminal (Killercoda-style
-  — the value is *not* read as a file; it's the command the container shell
-  runs). It runs from `/scenario` (see below), **in the terminal**, so its
-  output is visible and it **blocks** the terminal until it finishes. Fires once
-  per run when the screen is entered. Reference scripts relative to the scenario
-  folder, e.g. `./foreground.sh` or `sh foreground.sh`.
+  `docker exec`) when the screen is entered (once per run). stdout/stderr are
+  captured to `/var/log/rockdemo/<scenario>/<step>_background.log` inside the
+  container.
+- `foreground` — optional. A **single-line command** sent verbatim to the
+  node's terminal (Killercoda-style — *not* read as a file). It runs from
+  `/scenario`, **in the terminal** (output visible), and **blocks** the terminal
+  until it finishes. While it runs, **START/NEXT is disabled** for that screen and
+  re-enabled once it completes. Reference scripts relative to the scenario folder,
+  e.g. `./foreground.sh` or `sh foreground.sh`.
+- `verify` — optional (steps only). A command (resolved like `foreground`) that
+  checks the step was completed. The step shows a **✓ VERIFY** button and
+  **hides NEXT/FINISH until the command exits 0**. It runs hidden; output is
+  captured to `/var/log/rockdemo/<scenario>/<step>_verify.log`. On failure the
+  VERIFY button flashes red and a notification points to the log.
+- `host` — selects the target node by name for `background`/`foreground`/
+  `verify`; otherwise the first node is used. If the named host doesn't exist,
+  rockDemo warns naming the missing host.
+
+> When a step has **both** `verify` and `foreground`, NEXT is hidden+disabled
+> until verify passes **and** the foreground command finishes.
 
 The **scenario folder is bind-mounted read-only at `/scenario`** in every
-container, so scenario scripts are available to run (and `foreground` commands
-`cd /scenario` first). Read-only keeps your host files safe.
-- `details.steps[].verify` — optional. A command (resolved like `foreground`,
-  from `/scenario` with `.` on PATH) that checks the step was completed. When
-  present, the step shows a **VERIFY** button and **hides NEXT/FINISH until the
-  command exits 0**. It runs hidden (via `docker exec`, nothing in the
-  terminal); its output is captured to
-  `/var/log/rockdemo/<scenario>/<step_number>_verify.log` inside the container.
-  On failure the VERIFY button flashes red and a notification points to the log.
-- `host` (sibling key on the intro/step) selects the target node by name for
-  `background`, `foreground`, and `verify`; otherwise the first node is used (or
-  the single `backend`).
-- `details.assets` — optional. Each key is a **node name** (must match a node /
-  `backend` host) and maps to a list of asset rules:
-  - `file` — glob (relative to `index.json`; `*` supported in the last path
-    segment) of host files/folders to stage.
-  - `target` — destination path **inside the container**.
-  - `chmod` — `"+w"` (read-write) or `"+r"` (read-only).
+container, so scenario scripts are available to run (and `foreground`/`verify`
+run from there with `.` on `PATH`). Read-only keeps your host files safe.
 
-  Assets are **live-editable**. Rather than a one-shot `docker cp`, rockDemo
-  copies the matched files into a per-run scratch dir
-  (`<scenario>/.rockdemo-run/<node>/…`) and **bind-mounts that copy** into the
-  container. So:
-  - your **original files are never touched** (only the scratch copy is),
-  - editing the staged files in VS Code is reflected live inside the container
-    (and vice-versa for `+w`), and
-  - `+r` is enforced as a **read-only mount** (`:ro`) — still editable from the
-    host, just not writable by the container.
+#### `details.assets`
 
-  The scratch dir is re-created fresh on every open/RESTART and **deleted when
-  the demo ends** (stop/close). It's gitignored (`.rockdemo-run/`).
+Each key is a **node name** (must match a node / `backend` host) and maps to a
+list of asset rules:
+
+- `file` — glob (relative to `index.json`; `*` supported in the last path
+  segment) of host files/folders to stage.
+- `target` — destination path **inside the container**.
+- `chmod` — `"+w"` (read-write) or `"+r"` (read-only).
+
+Assets are **live-editable**. Rather than a one-shot `docker cp`, rockDemo
+copies the matched files into a per-run scratch dir
+(`<scenario>/.rockdemo-run/<node>/…`) and **bind-mounts that copy** into the
+container. So:
+
+- your **original files are never touched** (only the scratch copy is),
+- editing the staged files in VS Code is reflected live inside the container
+  (and vice-versa for `+w`), and
+- `+r` is enforced as a **read-only mount** (`:ro`) — still editable from the
+  host, just not writable by the container.
+
+The scratch dir is re-created fresh on every open/RESTART and **deleted when
+the demo ends**. It's gitignored (`.rockdemo-run/`).
 
 A working example lives in [scenarios/simple/index.json](https://github.com/rockops/rockdemo/blob/main/scenarios/simple/index.json).
+
+## Backends
+
+When a scenario uses `backend.imageid` (no `backendExtended`), the value is
+treated as a **key** into the bundled default profiles in
+[config/backends.json](config/backends.json). These profiles mimic Killercoda's
+named environments so the same scenario JSON runs unchanged. Each profile has
+the same shape as a `backendExtended` block:
+
+```json
+{
+  "ubuntu": { "nodes": { "node1": { "imageid": "ghcr.io/rockops/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true } } },
+  "alpine": { "nodes": { "node1": { "imageid": "alpine", "ip": "172.30.1.2", "cmd": "sh" } } }
+}
+```
+
+- An **unknown key** warns and launches nothing — for anything not covered by a
+  default profile, use `backendExtended`.
+- `config/backends.json` is bundled in the extension; it is the *default*
+  configuration. To customise, use `backendExtended` in your scenario.
+
+### Networking & `/etc/hosts`
+
+Killercoda gives nodes static IPs. When any node declares an `ip`, rockDemo:
+
+1. creates (idempotently) a user-defined Docker network `rockdemo` on subnet
+   `172.30.0.0/16`,
+2. attaches every node to it with its pinned `--ip`, and
+3. appends `<ip> <hostname>` lines for all nodes to each container's
+   `/etc/hosts`, so nodes can resolve one another by name.
+
+### Custom images
+
+Killercoda's environments come with tooling pre-installed. rockDemo ships
+Dockerfiles under [docker/](docker/) (one subfolder per image). The `ubuntu`
+image ([docker/ubuntu/Dockerfile](docker/ubuntu/Dockerfile)) is `ubuntu:24.04`
+plus `curl`, `wget`, `telnet`, `docker.io`, and `podman`, with `WORKDIR /root`.
+
+The image is published to the **GitHub Container Registry** by
+[.github/workflows/docker-image.yml](.github/workflows/docker-image.yml) as
+`ghcr.io/rockops/ubuntu:24.04` (and `:latest`). The workflow runs on pushes to
+`main` that touch `docker/ubuntu/**`, and can also be triggered manually from the
+Actions tab. It authenticates with the built-in `GITHUB_TOKEN`, so there are no
+secrets to configure. Docker pulls the public image automatically the first time
+a scenario references it — teammates don't need to build anything.
+
+To build it locally instead (tag must match the `imageid` in
+`config/backends.json`):
+
+```bash
+docker build -t ghcr.io/rockops/ubuntu:24.04 docker/ubuntu
+```
+
+> The GHCR package must be **public** for an unauthenticated `docker pull` to
+> work. After the first publish, set the package's visibility to public under the
+> repo/org **Packages** settings (a one-time step).
+
+### Docker-in-Docker
+
+A node with `"docker": true` runs `--privileged` (with `--cgroupns=host` and
+dedicated volumes for `/var/lib/docker` and `/var/lib/containers`) and rockDemo
+starts an in-container `dockerd` for it, so the scenario can run `docker`/
+`podman` *inside* the node. The daemon takes a few seconds to come up.
+
+### Safe cleanup
+
+Every container, volume, and network rockDemo creates is stamped with the label
+`rockdemo=1`. On activation it sweeps **only** labelled stale resources (e.g.
+from a VS Code window that was force-closed mid-scenario), so an unclean exit
+never leaves orphans — and unrelated Docker objects are never touched. rockDemo
+never runs `docker volume prune` or any unscoped delete.
+
+## Step gating (verify / foreground)
+
+The end-of-step navigation reacts to the step's scripts:
+
+- **`verify`** → NEXT/FINISH is **hidden** behind a **VERIFY** button until the
+  verify command exits 0.
+- **`foreground`** → NEXT/START is **disabled** while the foreground command runs
+  and re-enabled when it finishes. Completion is detected via a marker file the
+  command touches when done.
+- Both compose, as noted above.
+
+On **RESTART** the webview HTML is rebuilt from scratch so all of these gates
+reset to their initial state.
 
 ## Project layout
 
 ```
 rockdemo/
 ├── package.json           # Extension manifest (commands, activation events)
-├── src/extension.js       # All the logic: parser, CodeLens provider, commands
-├── example/scenario.md    # A sample scenario to try the buttons on
+├── src/extension.js       # All the logic — parser, CodeLens, webview, Docker
+├── config/backends.json   # Bundled default backend profiles (image-id keys)
+├── docker/<image>/Dockerfile  # Custom images (e.g. docker/ubuntu)
+├── media/                 # Vendored highlight.js + light/dark themes
+├── scenarios/simple/      # A full scenario example (index.json + steps)
+├── example/scenario.md    # A sample single-file scenario
 ├── .vscode/launch.json    # "Run rockDemo Extension" debug config (F5)
+├── BUILD.md               # Release / publish process
 └── README.md
 ```
 
-The implementation lives entirely in [src/extension.js](https://github.com/rockops/rockdemo/blob/main/src/extension.js):
+The implementation lives entirely in [src/extension.js](https://github.com/rockops/rockdemo/blob/main/src/extension.js).
+Notable pieces:
 
-- `parseScenario(document)` — line-based parser that walks the markdown,
-  tracking fence open/close and extracting `{ openLine, action, lang, content }`
-  for each actionable block.
-- `ScenarioCodeLensProvider` — turns those blocks into `vscode.CodeLens`
-  buttons positioned on the opening fence line.
-- `renderDemoBody()` / `demoHtml()` — a small zero-dependency markdown→HTML
-  renderer used for demo mode. It drops non-actionable fences, turns actionable
-  blocks into `<button>`s, and serves the HTML inside a CSP-locked webview.
-- `openDemoPanel()` — creates/reveals the demo webview beside the editor and
-  relays button clicks back to the shared action handlers via `postMessage`.
-- `activate()` — registers the CodeLens provider plus the commands
-  `rockdemo.exec`, `rockdemo.copy`, `rockdemo.open`, and `rockdemo.preview`
-  (the title-bar **▶ Run demo** button).
-
-Both modes call the same `runExec` / `runCopy` / `runOpen` handlers, so edit
-mode and demo mode can never drift apart.
+- `parseScenario` / `parseAnnotation` — line-based parser for actionable fenced
+  blocks and their `{{…}}` annotations (incl. the `interrupt` modifier).
+- `ScenarioCodeLensProvider` — turns blocks into `vscode.CodeLens` buttons.
+- `renderMarkdownToHtml` / `renderInline` / `inlineCodeHtml` / `codeBlockHtml` —
+  the zero-dependency markdown renderer (HTML passthrough, blockquotes, inline
+  code icons, highlight.js integration).
+- `resolveNodes` / `loadBackends` / `nodesFromMap` — resolve a scenario's
+  backend into the list of nodes to launch.
+- `startNodes` / `startNamedContainer` / `startDockerd` / `updateHosts` — launch
+  the per-node containers (hostname, static IP, network, DinD) and wire them up.
+- `runBackground` / `runForeground` / `runVerify` / `pollForegroundDone` — the
+  per-step script execution and gating.
+- `scenarioHtml` / `restartScenario` / `cleanupStaleResources` — the scenario
+  player webview, restart, and safe label-based cleanup.
 
 ## Requirements
 
 - VS Code `^1.75.0`.
-- **No dependencies, no build step.** The `vscode` module is provided by the
+- **Docker** on the extension host's PATH (for scenario mode).
+- **No npm dependencies, no build step.** The `vscode` module is provided by the
   host at runtime, so there is no `npm install` and nothing to compile — the
-  extension runs straight from `src/extension.js`.
+  extension runs straight from `src/extension.js`. The only third-party code is a
+  **vendored** copy of [highlight.js](https://highlightjs.org/) in
+  [media/](media/) (a static asset, not an npm dependency).
+
+## Third-party notices
+
+This extension bundles [highlight.js](https://github.com/highlightjs/highlight.js)
+(the common-languages browser build) under [media/](media/) for syntax
+highlighting. highlight.js is distributed under the BSD-3-Clause license; its full
+license text is kept alongside it at
+[media/LICENSE-highlight.js](media/LICENSE-highlight.js).
 
 ## How to test it in VS Code
 
@@ -216,26 +375,14 @@ second VS Code window that loads rockDemo from source.
    green ▶. This config is defined in [.vscode/launch.json](https://github.com/rockops/rockdemo/blob/main/.vscode/launch.json)
    and starts a new window titled **[Extension Development Host]** with rockDemo
    active.
-3. **Open a scenario** — in the new window, open
-   [example/scenario.md](https://github.com/rockops/rockdemo/blob/main/example/scenario.md).
-4. **Edit mode** — CodeLens links (**▶ Run in terminal / 📋 Copy /
-   📂 Open file**) appear above each code block. Click them and watch:
-   - **Step 1** (`bash`, no annotation) → runs in the terminal.
-   - **Step 2** (`{{exec}}`) → runs in the terminal.
-   - **Step 3** (`{{copy}}`) → copies only; check the clipboard.
-   - **Step 4** (`{{open}}`) → tries to open `../hello/main.py` relative to the
-     scenario (create that file, or change the path, to see it open).
-5. **Demo mode** — click **▶ Run demo** in the editor title bar (top-right,
-   next to the built-in preview icon). A "Demo: scenario.md" panel opens beside
-   the editor with the markdown rendered, the ` ```bash ` fences hidden, and a
-   button under each command. Click a button → it runs/copies/opens just like
-   edit mode. Edit or save the source and the demo panel updates live.
-6. **Scenario mode** — open [scenarios/simple/index.json](https://github.com/rockops/rockdemo/blob/main/scenarios/simple/index.json)
+3. **Edit / Demo mode** — open [example/scenario.md](https://github.com/rockops/rockdemo/blob/main/example/scenario.md).
+   CodeLens links appear above each code block (edit mode); click **▶ Run demo**
+   in the title bar to open the demo webview.
+4. **Scenario mode** — open [scenarios/simple/index.json](https://github.com/rockops/rockdemo/blob/main/scenarios/simple/index.json)
    and click **▶ Run demo**. You'll see the intro (title + description +
-   **START**), and a `rockDemo` terminal opens running
-   `docker run -it --rm alpine sh` (needs Docker installed and running). Click
-   **START** to step through the scenario with **PREV / NEXT / FINISH**; the
-   `{{exec}}` buttons send their commands into the container shell.
+   **START**), and a terminal per node opens running its container (needs Docker
+   installed and running). Click **START** to step through with **PREV / NEXT /
+   FINISH**; `{{exec}}` buttons send their commands into the active node's shell.
 
 ### Iterating on changes
 
@@ -249,7 +396,13 @@ buttons don't appear, confirm:
 - the block has a recognised annotation or is a `bash`/`sh`/`shell` block, and
 - the block body is non-empty (empty blocks are skipped).
 
-## Scenario format
+## Building & releasing
+
+Packaging the `.vsix` and publishing to the VS Code Marketplace (branches,
+alpha/stable channels, tags, the GitHub Actions pipeline) is documented in
+[BUILD.md](BUILD.md).
+
+## Scenario format (single-file)
 
 The annotation goes on the **closing** fence:
 
@@ -276,11 +429,3 @@ Notes:
 - The `lang` after the opening fence only matters for the bash/sh/shell
   default-exec behaviour; any language works with an explicit annotation.
 - `{{open}}` paths are resolved relative to the scenario file's directory.
-
-## Roadmap / MVP scope
-
-This is **step 1**: parse a scenario `.md` and put working buttons over the
-actionable blocks. Planned next steps:
-
-1. A Webview "presenter panel" with step-through navigation.
-2. Simulated editor-typing for a more polished live-demo feel.
