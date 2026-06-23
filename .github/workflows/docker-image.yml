@@ -3,7 +3,7 @@ name: Docker image (ubuntu)
 # Build the rockDemo "ubuntu" backend image and publish it to the GitHub
 # Container Registry (GHCR). GHCR auth uses the built-in GITHUB_TOKEN, so there
 # are no secrets to configure. The published image is:
-#   ghcr.io/<owner>/ubuntu:24.04  (and :latest)
+#   ghcr.io/<owner>/rockdemo/ubuntu:24.04  (and :latest)
 # which is the imageid referenced by config/backends.json.
 
 on:
@@ -28,7 +28,7 @@ jobs:
       # but lowercasing keeps this correct for forks under any-cased orgs.
       - name: Compute lowercase image name
         id: img
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ubuntu" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rockdemo/ubuntu" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
