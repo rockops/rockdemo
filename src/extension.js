@@ -192,10 +192,14 @@ function ensureNetworkCmd() {
  * (defaults to `sh`). When `useNet` is set the container joins the rockdemo
  * network (so nodes can talk), with a static `--ip` if `ip` is given. When
  * `privileged` is set the container runs `--privileged` (needed for the
- * Docker-in-Docker daemon started later). Returns a record:
+ * Docker-in-Docker daemon started later). When `systemd` is set the container
+ * boots `/sbin/init` as PID 1 (detached) and the interactive shell is attached
+ * via `docker exec` — so `systemctl` works inside, matching a real host. When
+ * `systemd` is unset the shell itself is PID 1 (lighter: no init, instant
+ * start), which is the default for simple scenarios. Returns a record:
  * { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
@@ -211,26 +215,48 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged)
     ? `--network ${NET_NAME} ${ip ? `--ip ${ip} ` : ""}`
     : "";
   // Nested container runtimes need --privileged, plus volumes for their storage
-  // roots (/var/lib/docker for docker, /var/lib/containers for podman) so the
+  // roots (/var/lib/docker for docker, /var/lib/containers for podman,
+  // /var/lib/containerd for a standalone containerd as used by kubeadm) so the
   // inner overlay sits on a real filesystem — stacking overlay-on-overlay
-  // otherwise fails. The volumes are anonymous (auto-removed by --rm) but
+  // otherwise fails with "mount overlay ... invalid argument" and no pod
+  // sandbox can ever start. The volumes are anonymous (auto-removed by --rm) but
   // labelled, so any orphans can be swept by label. `--cgroupns=host` lets
   // podman/conmon create cgroups in the full host hierarchy (avoids the
-  // cgroup-v2 "no internal processes" warning).
+  // cgroup-v2 "no internal processes" warning). `/lib/modules` is bind-mounted
+  // read-only so `modprobe` inside the container finds the host kernel's
+  // modules (br_netfilter, overlay, ...) — the modules are global to the shared
+  // kernel, this just hands the container the matching .ko files + dep metadata
+  // so the raw CNCF kubeadm procedure runs unmodified.
   const priv = privileged
     ? `--privileged --cgroupns=host ` +
       `--mount type=volume,dst=/var/lib/docker,volume-label=${ROCKDEMO_LABEL} ` +
-      `--mount type=volume,dst=/var/lib/containers,volume-label=${ROCKDEMO_LABEL} `
+      `--mount type=volume,dst=/var/lib/containers,volume-label=${ROCKDEMO_LABEL} ` +
+      `--mount type=volume,dst=/var/lib/containerd,volume-label=${ROCKDEMO_LABEL} ` +
+      `-v /lib/modules:/lib/modules:ro `
     : "";
   // Drop any stale container with this name first (e.g. after a hard restart),
   // then run a fresh one with the configured command (defaults to `sh`).
   // `--hostname` makes the node name show up in the shell prompt; `--label`
   // marks it for the startup sweep.
+  //
+  // systemd mode: PID 1 must be `/sbin/init`, so we can't attach the shell to
+  // `docker run`. Instead run the container detached booting systemd, then
+  // attach the interactive shell with `docker exec`. On exit the container
+  // keeps running (systemd is PID 1); teardown's `docker rm -f` cleans it up.
+  // `--tmpfs /run /run/lock` give systemd writable runtime dirs without
+  // persisting them. Non-systemd mode is unchanged: the shell is PID 1.
+  const runArgs =
+    `--label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ` +
+    `${priv}${netArgs}${vol} ${imageid}`;
+  const launch = systemd
+    ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
+      `docker exec -it ${containerName} ${shell}`
+    : `docker run -it --rm ${runArgs} ${shell}`;
   term.sendText(
     (
       netEnsure +
       `docker rm -f ${containerName} >/dev/null 2>&1; ` +
-      `docker run -it --rm --label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ${priv}${netArgs}${vol} ${imageid} ${shell}`
+      launch
     ).replace(/\s+/g, " "),
     true
   );
@@ -264,6 +290,7 @@ function nodesFromMap(nodes) {
     cmd: nodes[name].cmd,
     ip: nodes[name].ip,
     docker: !!nodes[name].docker,
+    systemd: !!nodes[name].systemd,
   }));
 }
 
@@ -300,6 +327,20 @@ function startNodes(entry) {
   entry.bgDone = new Set(); // re-arm background scripts for this run
   entry.fgDone = new Set(); // re-arm foreground scripts for this run
   if (entry.baseFsPath) wipeRunDir(entry.baseFsPath);
+  // Warn about asset blocks keyed to a node that doesn't exist — otherwise the
+  // assets silently never stage (a recurring "no files in the container" trap,
+  // e.g. an "host01" key when the backend node is "node1").
+  if (entry.assets) {
+    const nodeNames = new Set(entry.nodes.map((n) => n.name));
+    const orphans = Object.keys(entry.assets).filter((k) => !nodeNames.has(k));
+    if (orphans.length) {
+      vscode.window.showWarningMessage(
+        `rockDemo: assets for ${orphans.map((o) => `"${o}"`).join(", ")} ` +
+          `won't be copied — no such node. Available nodes: ` +
+          `${[...nodeNames].join(", ") || "none"}.`
+      );
+    }
+  }
   // If any node declares a static IP, every node joins the shared rockdemo
   // network so they can communicate (those with an `ip` get pinned addresses).
   const useNet = entry.nodes.some((n) => n.ip);
@@ -313,7 +354,7 @@ function startNodes(entry) {
       if (entry.baseFsPath) {
         mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
       }
-      return startNamedContainer(n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker);
+      return startNamedContainer(n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd);
     });
   // VS Code makes the most-recently-created terminal the active one, and that
   // selection is applied asynchronously — so a synchronous show() of the first
@@ -336,7 +377,9 @@ function startNodes(entry) {
  * inside the container. The daemon takes a few seconds to accept connections.
  */
 async function startDockerd(entry) {
-  const dindNodes = (entry.nodes || []).filter((n) => n.docker);
+  // systemd nodes manage dockerd via their own docker.service — hand-starting a
+  // second daemon here would race the same socket, so skip them.
+  const dindNodes = (entry.nodes || []).filter((n) => n.docker && !n.systemd);
   if (!dindNodes.length) return;
   for (const node of dindNodes) {
     const rec = (entry.terminals || []).find((r) => r.name === node.name);
@@ -461,32 +504,78 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * Expand an asset `file` pattern (relative to the index.json directory) into a
- * list of absolute host paths. `*` is supported in the final path segment.
- */
-function expandGlob(baseDir, pattern) {
-  const dirPart = path.dirname(pattern);
-  const filePart = path.basename(pattern);
-  const absDir = path.resolve(baseDir, dirPart);
-  let names;
-  try {
-    names = fs.readdirSync(absDir);
-  } catch (err) {
-    return [];
-  }
-  const rx = new RegExp(
-    "^" + filePart.split("*").map(escapeRegExp).join(".*") + "$"
-  );
-  return names.filter((n) => rx.test(n)).map((n) => path.join(absDir, n));
+/** Compile one path segment to a regex body: `*` → any run of non-slash. */
+function segToRegExp(seg) {
+  return seg.split("*").map(escapeRegExp).join("[^/]*");
 }
 
-function isDirectory(p) {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch (err) {
-    return false;
-  }
+/**
+ * Compile an asset glob to an anchored regex matched against paths relative to
+ * the assets root. `*` matches within a single segment; a `**` segment matches
+ * any number of segments (recursive, including zero).
+ */
+function globToRegExp(pattern) {
+  const segs = pattern.split("/");
+  let re = "^";
+  segs.forEach((seg, i) => {
+    const last = i === segs.length - 1;
+    if (seg === "**") {
+      // Trailing globstar matches everything below; an interior globstar
+      // matches zero or more directory levels.
+      re += last ? ".*" : "(?:[^/]*/)*";
+    } else {
+      re += segToRegExp(seg);
+      if (!last) re += "/";
+    }
+  });
+  return new RegExp(re + "$");
+}
+
+/**
+ * Normalize an asset `target` to an absolute container path. Docker requires
+ * the mount destination to be absolute, so a leading `~` (the example's `~/`)
+ * is expanded to root's home (`/root` — the user these images run as).
+ */
+function normalizeContainerPath(target) {
+  if (target === "~" || target === "~/") return "/root";
+  if (target.startsWith("~/")) return "/root/" + target.slice(2);
+  return target;
+}
+
+/** Recursively list every file under `dirAbs`, as paths relative to it. */
+function listFiles(dirAbs) {
+  const out = [];
+  const walk = (d, rel) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch (err) {
+      return;
+    }
+    for (const e of entries) {
+      const r = rel ? rel + "/" + e.name : e.name;
+      if (e.isDirectory()) walk(path.join(d, e.name), r);
+      else out.push(r);
+    }
+  };
+  walk(dirAbs, "");
+  return out;
+}
+
+/**
+ * Expand an asset `file` pattern into matching **file** paths (never folders)
+ * relative to `rootDir` (the scenario's assets/ dir). Supports `*` (one
+ * segment) and `**` (recursive). Matching only files mirrors Killercoda: a
+ * final `*` means "the files here" — folders are crossed by earlier path
+ * segments (like an "app*" segment) or by a globstar, never copied as a unit.
+ */
+function expandGlob(rootDir, pattern) {
+  const clean = pattern.replace(/^\.?\/+/, "").replace(/\/+$/, "");
+  if (!clean) return [];
+  const rx = globToRegExp(clean);
+  return listFiles(rootDir)
+    .filter((rel) => rx.test(rel))
+    .sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -709,53 +798,74 @@ async function runVerify(entry, stepId) {
 }
 
 /**
- * Stage one asset rule into the scratch dir and return a mount descriptor
- * { host, container, ro }, or null if nothing matched. The copy lives under
- * <scenario>/.rockdemo-run/<node>/<idx>/ and is what gets bind-mounted — the
- * originals are never touched, and `+r` becomes a read-only (`:ro`) mount.
- * `container` is the mount point inside the container, used both to mount and
- * to reverse-map container paths back to the host copy for {{open}}.
+ * Stage one asset rule's matched files into `scratchDir`. A **wildcard** pattern
+ * keeps each file's full path relative to the assets root (Killercoda keeps the
+ * whole matched path under `target`, e.g. `app1/**` → `target/app1/...`). A
+ * **literal single-file** pattern (no `*`) drops the directory and uses just the
+ * basename (e.g. `app1/readme.md` → `target/readme.md`). `expandGlob` only ever
+ * returns files. Returns the number staged (0 if nothing matched). `+x` marks
+ * the staged copy executable; originals are never touched.
  */
-function stageRule(baseDir, nodeName, idx, rule) {
-  const matches = expandGlob(baseDir, rule.file);
-  if (!matches.length) {
+function stageRuleInto(assetsRoot, scratchDir, nodeName, rule) {
+  const files = expandGlob(assetsRoot, rule.file);
+  if (!files.length) {
     vscode.window.showWarningMessage(
       `rockDemo: no files match "${rule.file}" for node "${nodeName}"`
     );
-    return null;
+    return 0;
   }
-  const safeNode = nodeName.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  const scratchDir = path.join(baseDir, RUN_DIR, safeNode, String(idx));
-  fs.mkdirSync(scratchDir, { recursive: true });
-  const ro = rule.chmod === "+r";
-
-  if (matches.length === 1 && isDirectory(matches[0])) {
-    // Single folder → its contents become the mounted target directory.
-    fs.cpSync(matches[0], scratchDir, { recursive: true });
-    return { host: scratchDir, container: rule.target, ro };
+  const literal = !rule.file.includes("*");
+  let n = 0;
+  for (const rel of files) {
+    const destRel = literal ? path.basename(rel) : rel;
+    const dst = path.join(scratchDir, destRel);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(path.join(assetsRoot, rel), dst);
+    if (rule.chmod === "+x") {
+      try {
+        fs.chmodSync(dst, 0o755);
+      } catch (err) {
+        /* best-effort — ignore */
+      }
+    }
+    n++;
   }
-  if (matches.length === 1) {
-    // Single file → mount the directory holding it (mounting a lone file
-    // breaks when an editor saves via atomic rename), with the file named to
-    // match the target's basename.
-    fs.copyFileSync(matches[0], path.join(scratchDir, path.basename(rule.target)));
-    return { host: scratchDir, container: path.posix.dirname(rule.target), ro };
-  }
-  // Multiple matches → copy each into the scratch dir (the mounted target).
-  for (const m of matches) {
-    fs.cpSync(m, path.join(scratchDir, path.basename(m)), { recursive: true });
-  }
-  return { host: scratchDir, container: rule.target, ro };
+  return n;
 }
 
-/** Stage every asset rule for a node, returning its list of mount descriptors. */
+/**
+ * Stage every asset rule for a node, returning its list of mount descriptors
+ * { host, container, ro }. Rules are grouped by `target` so several rules can
+ * populate one mounted directory (otherwise same-target mounts would shadow
+ * each other). Each group's copy lives under <scenario>/.rockdemo-run/<node>/
+ * <idx>/ and is bind-mounted at `target`; the originals are never touched, and
+ * a group whose every rule is `+r` becomes a read-only (`:ro`) mount. The
+ * `container` (mount point) is also used to reverse-map container paths back to
+ * the host copy for {{open}}.
+ */
 function stageNodeAssets(entry, node) {
   const rules = (entry.assets && entry.assets[node.name]) || [];
+  const assetsRoot = path.join(entry.baseFsPath, "assets");
+  const safeNode = node.name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  // Group rules by target, preserving first-seen order.
+  const byTarget = new Map();
+  for (const rule of rules) {
+    if (!byTarget.has(rule.target)) byTarget.set(rule.target, []);
+    byTarget.get(rule.target).push(rule);
+  }
   const mounts = [];
-  rules.forEach((rule, i) => {
-    const m = stageRule(entry.baseFsPath, node.name, i, rule);
-    if (m) mounts.push(m);
-  });
+  let idx = 0;
+  for (const [target, group] of byTarget) {
+    const scratchDir = path.join(entry.baseFsPath, RUN_DIR, safeNode, String(idx++));
+    fs.mkdirSync(scratchDir, { recursive: true });
+    let staged = 0;
+    for (const rule of group) {
+      staged += stageRuleInto(assetsRoot, scratchDir, node.name, rule);
+    }
+    if (!staged) continue;
+    const ro = group.every((r) => r.chmod === "+r");
+    mounts.push({ host: scratchDir, container: normalizeContainerPath(target), ro });
+  }
   return mounts;
 }
 
@@ -1701,6 +1811,19 @@ function scenarioHtml(data, webview) {
   const last = steps.length - 1;
   const sections = [];
 
+  // A scenario may have an intro but no steps (just a "start" screen). Then the
+  // intro itself is the terminal screen: it carries the end-screen actions
+  // (RESTART / CLOSE) instead of START, and there is no separate finish section
+  // to navigate to.
+  const noSteps = steps.length === 0;
+
+  // The terminal-screen actions, reused by the end screen and — when there are
+  // no steps — by the intro. RESTART rebuilds from scratch; CLOSE ends the
+  // scenario (tears down all containers/terminals, like STOP).
+  const endActions =
+    `<button class="primary" data-nav="restart">⟲ RESTART</button>` +
+    `<button class="primary" data-nav="close">✖ CLOSE</button>`;
+
   // If the intro has a foreground command, START is disabled until it finishes
   // (foregroundDone), mirroring NEXT gating on steps.
   const introFg = !!(
@@ -1708,15 +1831,18 @@ function scenarioHtml(data, webview) {
     scenario.details.intro &&
     scenario.details.intro.foreground
   );
+  const introNav = noSteps
+    ? `<div class="nav">${endActions}</div>`
+    : `<div class="nav"><button class="primary" data-target="0"${
+        introFg ? ' disabled data-fg-gated="1"' : ""
+      }>START ▶</button></div>`;
   sections.push(
     `<section class="step active" data-step="intro">` +
       `<h1>${escapeHtml(scenario.title || "Scenario")}</h1>` +
       `<p class="lead">${escapeHtml(scenario.description || "")}</p>` +
       // Optional intro markdown, rendered with the demo player (buttons work).
       (intro ? renderMarkdownToHtml(intro.md, intro.baseStr) : "") +
-      `<div class="nav"><button class="primary" data-target="0"${
-        introFg ? ' disabled data-fg-gated="1"' : ""
-      }>START ▶</button></div>` +
+      introNav +
       `</section>`
   );
 
@@ -1749,23 +1875,25 @@ function scenarioHtml(data, webview) {
     );
   });
 
-  // End screen — always present. Uses the scenario's finish.md when defined,
-  // otherwise a built-in completion message. RESTART rebuilds from scratch;
-  // CLOSE ends the scenario (tears down all containers/terminals, like STOP).
-  const finishBody = finish
-    ? renderMarkdownToHtml(finish, data.dirStr)
-    : `<h1>🎉 ${escapeHtml(scenario.title || "Scenario")} complete</h1>` +
-      `<p class="lead">You've reached the end of this scenario.</p>`;
-  sections.push(
-    `<section class="step" data-step="finish">` +
-      finishBody +
-      `<div class="nav">` +
-      `<button data-target="${last}">◀ PREV</button>` +
-      `<button class="primary" data-nav="restart">⟲ RESTART</button>` +
-      `<button class="primary" data-nav="close">✖ CLOSE</button>` +
-      `</div>` +
-      `</section>`
-  );
+  // End screen — present whenever there are steps to finish. (With no steps the
+  // intro is already the terminal screen, carrying the same actions, so there's
+  // nothing to navigate to here.) Uses the scenario's finish.md when defined,
+  // otherwise a built-in completion message.
+  if (!noSteps) {
+    const finishBody = finish
+      ? renderMarkdownToHtml(finish, data.dirStr)
+      : `<h1>🎉 ${escapeHtml(scenario.title || "Scenario")} complete</h1>` +
+        `<p class="lead">You've reached the end of this scenario.</p>`;
+    sections.push(
+      `<section class="step" data-step="finish">` +
+        finishBody +
+        `<div class="nav">` +
+        `<button data-target="${last}">◀ PREV</button>` +
+        endActions +
+        `</div>` +
+        `</section>`
+    );
+  }
 
   return pageHtml(webview, scenario.title || "Scenario", sections.join("\n"));
 }

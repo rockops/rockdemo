@@ -1,0 +1,27 @@
+# Give the node a real upstream resolver at boot, like a normal VM.
+#
+# Docker generates /etc/resolv.conf with its embedded stub resolver
+# (nameserver 127.0.0.11) on every container start. That loopback address only
+# works in the node's own network namespace, so a CoreDNS pod that forwards to
+# it loops back onto itself ("Loop detected") and can never reach a real
+# upstream. Rewriting /etc/resolv.conf to a routable resolver lets the kubelet
+# and CoreDNS run completely stock — no KubeletConfiguration.resolvConf, no
+# Corefile edits — matching the official kubeadm install on a real host.
+#
+# Trade-off: this drops Docker's embedded DNS (127.0.0.11), so nodes no longer
+# resolve each other via Docker DNS — but rockDemo already writes /etc/hosts
+# entries for every node at launch, so hostname resolution still works.
+#
+# Air-gapped: change 8.8.8.8 below to your reachable resolver.
+[Unit]
+Description=Set a real upstream DNS resolver (host-like, replaces Docker stub)
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\nsearch .\n" > /etc/resolv.conf'
+
+[Install]
+WantedBy=sysinit.target

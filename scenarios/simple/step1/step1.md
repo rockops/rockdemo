@@ -39,5 +39,5 @@ Use `{{open}}` with a **container path**: rockDemo opens the host copy that is
 bind-mounted there, so edits are live inside the container.
 
 ```text
-/var/killercoda/solution/first.txt
+/var/killercoda/solution/solution1/first.txt
 ```{{open}}

@@ -1,0 +1,22 @@
+# Make the root mount rshared at boot, so this container behaves like a real
+# systemd host (where / is shared by default). Docker starts containers with
+# private mount propagation, which breaks two things the raw Kubernetes/CNI
+# procedures rely on:
+#   - the kubelet propagating pod volume mounts to the container runtime, and
+#   - CNIs like Cilium mounting bpffs at /sys/fs/bpf with Bidirectional
+#     propagation (runc requires the source mount to be shared or slave).
+# This mirrors what the prebuilt kubernetes-kubeadm-1node entrypoint does
+# imperatively (`mount --make-rshared /`), but as a boot-time unit so the
+# manual CNCF procedure needs no extra steps.
+[Unit]
+Description=Make / rshared for nested Kubernetes (kubelet + CNI bpffs)
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/mount --make-rshared /
+
+[Install]
+WantedBy=sysinit.target
