@@ -12,7 +12,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # ca-certificates so curl/wget can talk HTTPS; telnet is a transitional package
 # that pulls the inetutils client on 24.04.
-RUN apt-get update \
+RUN touch /etc/modules \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -20,6 +21,11 @@ RUN apt-get update \
       telnet \
       docker.io \
       podman \
+      kmod \
+      sudo \
+      vim \
+      nano \
+      tree \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root

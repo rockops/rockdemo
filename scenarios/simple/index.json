@@ -26,15 +26,11 @@
         }
       ],
       "assets": {
-        "host01": [
-          {"file": "solution*", "target": "/var/killercoda/solution","chmod":"+w"},
-          {"file": "solution*", "target": "/var/killercoda/solution_copy","chmod":"+w"},
-          {"file": "solution1/first.txt", "target": "/var/killercoda/solution_copy2/copyfirst.txt","chmod":"+w"}
-        ],
-        "host02": [
-          {"file": "solution*", "target": "/var/killercoda/solution2","chmod":"+r"}
+        "host1": [
+          {"file": "solution*/**", "target": "/var/killercoda/solution","chmod":"+w"},
+          {"file": "solution*/**", "target": "/var/killercoda/solution_copy","chmod":"+w"},
+          {"file": "solution1/first.txt", "target": "/var/killercoda/solution_copy2","chmod":"+w"}
         ]
-
       },
       "finish": {
         "text": "finish.md"

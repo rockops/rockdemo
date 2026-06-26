@@ -1,16 +1,17 @@
-name: Docker image (ubuntu)
+name: Docker images
 
-# Build the rockDemo "ubuntu" backend image and publish it to the GitHub
-# Container Registry (GHCR). GHCR auth uses the built-in GITHUB_TOKEN, so there
-# are no secrets to configure. The published image is:
-#   ghcr.io/<owner>/rockdemo/ubuntu:24.04  (and :latest)
-# which is the imageid referenced by config/backends.json.
+# Build the rockDemo backend images and publish them to the GitHub Container
+# Registry (GHCR). GHCR auth uses the built-in GITHUB_TOKEN, so there are no
+# secrets to configure. Published images are:
+#   ghcr.io/<owner>/rockdemo/<name>:24.04  (and :latest)
+# which are the imageids referenced by config/backends.json.
 
 on:
   push:
     branches: [main]
     paths:
       - docker/ubuntu/**
+      - docker/ubuntu-systemd/**
       - .github/workflows/docker-image.yml
   workflow_dispatch: # allow manual rebuilds from the Actions tab
 
@@ -21,6 +22,12 @@ permissions:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # `dir` is the build context under docker/; `name` is the GHCR repo path.
+        include:
+          - { dir: ubuntu, name: ubuntu }
+          - { dir: ubuntu-systemd, name: ubuntu-systemd }
     steps:
       - uses: actions/checkout@v5
 
@@ -28,7 +35,7 @@ jobs:
       # but lowercasing keeps this correct for forks under any-cased orgs.
       - name: Compute lowercase image name
         id: img
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rockdemo/ubuntu" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rockdemo/${{ matrix.name }}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -43,7 +50,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: docker/ubuntu
+          context: docker/${{ matrix.dir }}
           push: true
           tags: |
             ${{ steps.img.outputs.name }}:24.04

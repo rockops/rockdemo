@@ -135,7 +135,7 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
     ],
     "assets": {
       "host1": [
-        { "file": "solution*", "target": "/var/killercoda/solution", "chmod": "+w" }
+        { "file": "solution/**", "target": "/var/killercoda/solution", "chmod": "+w" }
       ]
     },
     "finish": { "text": "finish.md" }
@@ -205,10 +205,43 @@ run from there with `.` on `PATH`). Read-only keeps your host files safe.
 Each key is a **node name** (must match a node / `backend` host) and maps to a
 list of asset rules:
 
-- `file` — glob (relative to `index.json`; `*` supported in the last path
-  segment) of host files/folders to stage.
-- `target` — destination path **inside the container**.
-- `chmod` — `"+w"` (read-write) or `"+r"` (read-only).
+- `file` — glob of host **files** to stage, resolved **relative to the
+  scenario's `assets/` folder** (`<scenario>/assets/`). See globbing below.
+- `target` — destination **directory** inside the container (a leading `~`
+  expands to `/root`). A **wildcard** pattern places each file preserving its
+  **full path relative to `assets/`** — so `app1/**` → `target/app1/...` (the
+  matched prefix is kept, not stripped), nested folders recreated. A **literal
+  single file** (no `*`) is placed by **basename** — `app1/readme.md` →
+  `target/readme.md`.
+- `chmod` — `"+w"` (read-write), `"+r"` (read-only mount), or `"+x"`
+  (executable).
+
+**Globbing.** A pattern always resolves to a set of **files** (never folders),
+matched against the `assets/` tree — mirroring Killercoda:
+
+- `*` matches any run of characters **within a single path segment** (never
+  crosses `/`). As the **last** segment it selects the **files** in a folder
+  (not the sub-folders); as an earlier segment it selects folders to descend
+  into (e.g. `app*/…`).
+- `**` matches **any number of path segments** (recursive, including zero) — the
+  globstar. Use it to pull a folder's whole subtree (e.g. `app1/**`).
+- Wildcards may appear in **any** segment, not just the last.
+
+Each match keeps its **full path relative to `assets/`** under `target` — the
+matched prefix is never stripped. Examples, against
+[scenario-examples/upload-assets](scenario-examples/upload-assets) (root `assets/`):
+
+| `file` pattern   | matches                                  | lands under `target` as            |
+| ---------------- | ---------------------------------------- | ---------------------------------- |
+| `conf.yaml`      | `assets/conf.yaml`                       | `conf.yaml` (basename)             |
+| `app1/readme.md` | that one file                            | `readme.md` (basename, literal)    |
+| `*`              | top-level **files** only (not folders)   | `conf.yaml`, `run.sh`              |
+| `**`             | every file, recursively                  | `app1/config/app.json`, …          |
+| `app1/**`        | every file under `app1/`                 | `app1/config/app.json`, …          |
+| `**/*.json`      | every `.json` at any depth               | `app1/config/app.json`, …          |
+| `app1/**/*.json` | every `.json` under `app1/`              | `app1/config/app.json`, …          |
+| `app1/*/*.json`  | `.json` exactly one folder under `app1/` | `app1/config/app.json`, …          |
+| `app*/**/*.*`    | files with an extension under any `app*` | `app1/readme.md`, `app2/cnf/cnf.json`, … |
 
 Assets are **live-editable**. Rather than a one-shot `docker cp`, rockDemo
 copies the matched files into a per-run scratch dir
