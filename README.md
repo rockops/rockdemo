@@ -167,8 +167,22 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
 | `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
 | `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
+| `background` | Optional. A **script file** (path relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
+| `foreground` | Optional. A **script file** (path relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
 
 The node name becomes the container **hostname** (visible in the shell prompt).
+
+> **Backend scripts live under `config/<backend>/`** (e.g.
+> [config/ubuntu/startup.sh](config/ubuntu/startup.sh)) and the `background` /
+> `foreground` value is the file's path relative to `config/`. When a node
+> references one, rockDemo mounts the bundled `config/` folder read-only into the
+> container and runs the script **by path** — so there's nothing to copy and the
+> scripts are version-controlled with the extension.
+>
+> Backend `background`/`foreground` run **once per launch** (and again on
+> **RESTART**), on the intro screen — the moment the env comes up — so they're
+> ideal for readiness waits (e.g. blocking START until the in-container Docker
+> daemon is up). They compose with an intro `foreground`: START waits for both.
 
 #### `details.steps[]` / `details.intro`
 
@@ -269,10 +283,17 @@ the same shape as a `backendExtended` block:
 
 ```json
 {
-  "ubuntu": { "nodes": { "node1": { "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true } } },
+  "ubuntu": { "nodes": { "node1": { "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true,
+    "background": "ubuntu/background.sh", "foreground": "ubuntu/startup.sh" } } },
   "alpine": { "nodes": { "node1": { "imageid": "alpine", "ip": "172.30.1.2", "cmd": "sh" } } }
 }
 ```
+
+A profile node may also carry `background`/`foreground` **script files** that run
+automatically when the env starts (see the per-node fields table above). The
+value is a path under `config/` (here
+[config/ubuntu/startup.sh](config/ubuntu/startup.sh) blocks **START** until the
+in-container Docker daemon is ready).
 
 - An **unknown key** warns and launches nothing — for anything not covered by a
   default profile, use `backendExtended`.
@@ -351,6 +372,7 @@ rockdemo/
 ├── package.json           # Extension manifest (commands, activation events)
 ├── src/extension.js       # All the logic — parser, CodeLens, webview, Docker
 ├── config/backends.json   # Bundled default backend profiles (image-id keys)
+├── config/<backend>/*.sh  # Backend startup scripts (background/foreground)
 ├── docker/<image>/Dockerfile  # Custom images (e.g. docker/ubuntu)
 ├── media/                 # Vendored highlight.js + light/dark themes
 ├── scenarios/simple/      # A full scenario example (index.json + steps)

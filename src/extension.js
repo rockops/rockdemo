@@ -175,6 +175,31 @@ const NET_SUBNET = "172.30.0.0/16";
 // startup without touching unrelated Docker objects.
 const ROCKDEMO_LABEL = "rockdemo=1";
 
+// Where the extension's bundled config/ folder is mounted (read-only) inside a
+// node that references backend-level scripts, so they run by path in-container.
+const CONFIG_MOUNT = "/var/rockdemo/config";
+
+/** Host path of the extension's bundled config/ folder. */
+function backendScriptRoot() {
+  return path.join(extensionUri.fsPath, "config");
+}
+
+/**
+ * Resolve a backend script reference (a path relative to config/, e.g.
+ * "ubuntu/startup.sh") to its host path and the path it is mounted at inside the
+ * container. Returns null if the file is missing on the host.
+ */
+function resolveBackendScript(ref) {
+  if (!ref) return null;
+  const hostPath = path.join(backendScriptRoot(), ref);
+  try {
+    if (!fs.statSync(hostPath).isFile()) return null;
+  } catch (err) {
+    return null;
+  }
+  return { hostPath, containerPath: `${CONFIG_MOUNT}/${ref}` };
+}
+
 /** Shell snippet that ensures the rockdemo network exists (idempotent). */
 function ensureNetworkCmd() {
   return (
@@ -291,6 +316,8 @@ function nodesFromMap(nodes) {
     ip: nodes[name].ip,
     docker: !!nodes[name].docker,
     systemd: !!nodes[name].systemd,
+    background: nodes[name].background || null,
+    foreground: nodes[name].foreground || null,
   }));
 }
 
@@ -326,6 +353,7 @@ function startNodes(entry) {
   // Fresh scratch copies for this run: wipe, then stage per node and mount.
   entry.bgDone = new Set(); // re-arm background scripts for this run
   entry.fgDone = new Set(); // re-arm foreground scripts for this run
+  entry.fgPending = new Map(); // re-arm the per-screen foreground gates
   if (entry.baseFsPath) wipeRunDir(entry.baseFsPath);
   // Warn about asset blocks keyed to a node that doesn't exist — otherwise the
   // assets silently never stage (a recurring "no files in the container" trap,
@@ -353,6 +381,12 @@ function startNodes(entry) {
       // it keeps the host files safe from any container writes.
       if (entry.baseFsPath) {
         mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
+      }
+      // When the node references backend-level scripts (background/foreground),
+      // mount the extension's bundled config/ folder read-only so those scripts
+      // are available in the container at CONFIG_MOUNT and run by path.
+      if (n.background || n.foreground) {
+        mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
       }
       return startNamedContainer(n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd);
     });
@@ -692,7 +726,7 @@ function runForeground(entry, stepId) {
     );
     // Un-gate START/NEXT so the screen isn't stuck waiting on a command that
     // can't run.
-    postForegroundDone(entry, stepId);
+    fgUngate(entry, stepId, "self");
     return;
   }
 
@@ -703,6 +737,7 @@ function runForeground(entry, stepId) {
   if (!entry.fgDone) entry.fgDone = new Set();
   if (!entry.fgDone.has(stepId)) {
     entry.fgDone.add(stepId);
+    fgGate(entry, stepId, "self");
     // Reveal the node's terminal (without stealing focus) and send the command
     // as one line. The subshell scopes `cd /scenario` (the read-only scenario
     // mount where scripts live) and the "." on PATH to this run; the marker is
@@ -715,10 +750,123 @@ function runForeground(entry, stepId) {
   }
   // The intro gates START and steps gate NEXT until the marker appears. Safe to
   // (re)poll on every enter — e.g. after a save rebuilds the webview.
-  pollForegroundDone(entry, rec, marker, stepId);
+  pollForegroundDone(entry, rec, marker, stepId, "self");
 }
 
-/** Tell the webview a step's foreground command has finished (enables NEXT). */
+/**
+ * Run each node's backend-level `background` script (from a backends.json
+ * profile or `backendExtended`) detached in that node's own container, once per
+ * run. Like the intro/step background, but the command and target node come
+ * from the node config itself — so it fires automatically when the env starts.
+ */
+async function runBackendBackground(entry) {
+  for (const node of entry.nodes || []) {
+    if (!node.background) continue;
+    const key = "backend:" + node.name;
+    if (!entry.bgDone) entry.bgDone = new Set();
+    if (entry.bgDone.has(key)) continue; // already launched this run
+    entry.bgDone.add(key);
+
+    const rec = (entry.terminals || []).find((r) => r.name === node.name);
+    if (!rec) continue;
+
+    const script = resolveBackendScript(node.background);
+    if (!script) {
+      vscode.window.showWarningMessage(
+        `rockDemo: backend background script not found: config/${node.background}`
+      );
+      continue;
+    }
+    const scenarioName = entry.baseFsPath ? path.basename(entry.baseFsPath) : "scenario";
+    const logDir = `/var/log/rockdemo/${scenarioName}`;
+    const logFile = `${logDir}/${node.name}_backend_background.log`;
+    // The script is mounted read-only at CONFIG_MOUNT — run it by path, logging
+    // its output to a file inside the container.
+    const wrapped = `mkdir -p ${logDir}; sh ${script.containerPath} > ${logFile} 2>&1`;
+    // Retry until the container is up (its terminal may still be pulling).
+    for (let i = 0; i < 120; i++) {
+      if (entry.disposed) return;
+      try {
+        await execFile("docker", ["exec", "-d", rec.containerName, "sh", "-c", wrapped]);
+        break;
+      } catch (err) {
+        await delay(1000);
+      }
+    }
+  }
+}
+
+/**
+ * Run each node's backend-level `foreground` script in that node's terminal
+ * (once per run), visible and blocking like the intro/step foreground, and gate
+ * the intro START button until every one finishes. The script is mounted
+ * read-only at CONFIG_MOUNT and run by path; a marker file signals completion,
+ * polled hidden via `docker exec`.
+ */
+function runBackendForeground(entry) {
+  for (const node of entry.nodes || []) {
+    if (!node.foreground) continue;
+    const rec = (entry.terminals || []).find((r) => r.name === node.name);
+    if (!rec) continue;
+
+    const script = resolveBackendScript(node.foreground);
+    const marker = `/tmp/.rockdemo-fg-backend-${node.name}`;
+    const sendKey = "backend:" + node.name;
+    const token = "node:" + node.name;
+    if (!entry.fgDone) entry.fgDone = new Set();
+
+    // A missing script must still release the START gate (the rendered button is
+    // gated whenever a node declares a foreground), or START stays stuck. Warn
+    // once, then un-gate on every enter so a save-rebuild can't re-stick it.
+    if (!script) {
+      if (!entry.fgDone.has(sendKey)) {
+        entry.fgDone.add(sendKey);
+        vscode.window.showWarningMessage(
+          `rockDemo: backend foreground script not found: config/${node.foreground}`
+        );
+      }
+      fgUngate(entry, "intro", token);
+      continue;
+    }
+
+    if (!entry.fgDone.has(sendKey)) {
+      entry.fgDone.add(sendKey);
+      fgGate(entry, "intro", token);
+      rec.terminal.show(true);
+      rec.terminal.sendText(
+        `rm -f ${marker}; ( sh ${script.containerPath} ); touch ${marker}`,
+        true
+      );
+    }
+    // Safe to (re)poll on every intro enter (e.g. after a save rebuild).
+    pollForegroundDone(entry, rec, marker, "intro", token);
+  }
+}
+
+/**
+ * Register a pending foreground for a screen ("intro" or a step index). A screen
+ * may be gated by several foregrounds at once — its own intro/step command and
+ * any backend node commands — so each is tracked by a distinct token and the
+ * button is only un-gated once they all complete.
+ */
+function fgGate(entry, screen, token) {
+  if (!entry.fgPending) entry.fgPending = new Map();
+  let set = entry.fgPending.get(screen);
+  if (!set) {
+    set = new Set();
+    entry.fgPending.set(screen, set);
+  }
+  set.add(token);
+}
+
+/** Mark one pending foreground done; un-gate the screen once none remain. */
+function fgUngate(entry, screen, token) {
+  const set = entry.fgPending && entry.fgPending.get(screen);
+  if (set) set.delete(token);
+  if (!set || set.size === 0) postForegroundDone(entry, screen);
+}
+
+/** Tell the webview a screen's foreground commands have finished (enables NEXT). */
 function postForegroundDone(entry, stepId) {
   if (!entry.disposed && entry.panel) {
     entry.panel.webview.postMessage({ type: "foregroundDone", step: stepId });
@@ -727,22 +875,22 @@ function postForegroundDone(entry, stepId) {
 
 /**
  * Poll (hidden, via `docker exec`) for the foreground completion marker and,
- * once present, tell the webview to enable NEXT. Fails open: if the container
- * has no name, or after a long timeout, NEXT is enabled anyway so the user is
- * never permanently stuck.
+ * once present, mark this foreground's `token` done on its `screen`. Fails open:
+ * if the container has no name, or after a long timeout, the token is released
+ * anyway so the user is never permanently stuck.
  */
-async function pollForegroundDone(entry, rec, marker, stepId) {
-  if (!rec.containerName) return postForegroundDone(entry, stepId);
+async function pollForegroundDone(entry, rec, marker, screen, token) {
+  if (!rec.containerName) return fgUngate(entry, screen, token);
   for (let i = 0; i < 600; i++) {
     if (entry.disposed) return;
     try {
       await execFile("docker", ["exec", rec.containerName, "test", "-f", marker]);
-      return postForegroundDone(entry, stepId); // marker exists → finished
+      return fgUngate(entry, screen, token); // marker exists → finished
     } catch (err) {
       await delay(1000); // not yet — keep waiting
     }
   }
-  postForegroundDone(entry, stepId); // safety un-gate after timeout
+  fgUngate(entry, screen, token); // safety un-gate after timeout
 }
 
 /**
@@ -903,7 +1051,7 @@ function mapContainerPath(entry, containerPath) {
 function restartScenario(entry) {
   disposeEntryTerminals(entry);
   startNodes(entry);
-  buildScenario(entry.doc).then((data) => {
+  buildScenario(entry.doc, entry.nodes).then((data) => {
     if (!entry.disposed) {
       // VS Code ignores `webview.html = x` when `x` is byte-identical to the
       // current html — so a plain re-render of the same scenario would NOT
@@ -1695,6 +1843,16 @@ function makeMessageHandler(entry) {
       if (hostPath) openFsPath(hostPath);
       else runOpenBase(msg.file, msg.base ? vscode.Uri.parse(msg.base) : null);
     } else if (msg.nav === "enter") {
+      // Backend-level scripts are env setup — they must run FIRST, before any
+      // intro/step background/foreground. The intro is the "env start" screen,
+      // so kick them off here (once per run; both are guarded) ahead of the
+      // intro's own scripts. Steps come later (their own enter), and START is
+      // gated until the backend foreground finishes, so step scripts can never
+      // run before the backend init.
+      if (msg.step === "intro") {
+        runBackendBackground(entry);
+        runBackendForeground(entry);
+      }
       runBackground(entry, msg.step);
       runForeground(entry, msg.step);
     }
@@ -1755,10 +1913,13 @@ async function readText(uri) {
 }
 
 /** Load index.json + every step's markdown, relative to the json file. */
-async function buildScenario(jsonDoc) {
+async function buildScenario(jsonDoc, nodes) {
   const dir = vscode.Uri.joinPath(jsonDoc.uri, "..");
   const scenario = JSON.parse(jsonDoc.getText());
   const details = scenario.details || {};
+  // Any node carrying a backend-level foreground gates the intro START button
+  // until it finishes (same as an intro foreground does).
+  const backendFg = (nodes || []).some((n) => n.foreground);
   const stepDefs = details.steps || [];
 
   const steps = [];
@@ -1802,7 +1963,7 @@ async function buildScenario(jsonDoc) {
     }
   }
 
-  return { scenario, steps, intro, finish, dirStr: dir.toString() };
+  return { scenario, steps, intro, finish, backendFg, dirStr: dir.toString() };
 }
 
 /** Render the whole scenario (intro + steps + optional finish) to HTML. */
@@ -1826,11 +1987,13 @@ function scenarioHtml(data, webview) {
 
   // If the intro has a foreground command, START is disabled until it finishes
   // (foregroundDone), mirroring NEXT gating on steps.
-  const introFg = !!(
-    scenario.details &&
-    scenario.details.intro &&
-    scenario.details.intro.foreground
-  );
+  const introFg =
+    !!data.backendFg ||
+    !!(
+      scenario.details &&
+      scenario.details.intro &&
+      scenario.details.intro.foreground
+    );
   const introNav = noSteps
     ? `<div class="nav">${endActions}</div>`
     : `<div class="nav"><button class="primary" data-target="0"${
@@ -1975,7 +2138,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
     }
   }
 
-  const data = await buildScenario(entry.doc);
+  const data = await buildScenario(entry.doc, entry.nodes);
   entry.panel.webview.html = scenarioHtml(data, entry.panel.webview);
 }
 
@@ -2078,7 +2241,7 @@ function activate(context) {
     // Any save can affect a scenario (its index.json or any step markdown):
     // rebuild every open scenario player.
     for (const entry of scenarioPanels.values()) {
-      buildScenario(entry.doc).then((data) => {
+      buildScenario(entry.doc, entry.nodes).then((data) => {
         entry.panel.webview.html = scenarioHtml(data, entry.panel.webview);
       });
     }

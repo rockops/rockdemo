@@ -134,6 +134,9 @@ kubeadm init --config=kubeadm-config.yaml --upload-certs --node-name=cp \
 | tee kubeadm-init.out
 ```
 
+
+
+
 ```bash
 kubectl taint nodes --all node-role.kubernetes.io/control-plane-
 ```

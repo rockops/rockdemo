@@ -1,0 +1,51 @@
+#!/bin/sh
+# Backend foreground for the kubernetes-kubeadm-1node node. Everything else (apt
+# packages, containerd, kubelet, sysctls) is baked into the image — only the
+# parts that cannot be done at build time run here, blocking the player's START
+# button until the cluster is up:
+#   1. `kubeadm init`            (creates the control plane)
+#   2. install the Cilium CNI    (once the API server answers)
+#   3. wait for the node Ready   (turns Ready only after the CNI is up)
+#
+# Assets (kubeadm-config.yaml, cilium-cni.yaml) live alongside this script and
+# are mounted read-only at this path inside the container.
+set -e
+CFG=/var/rockdemo/config/kubernetes-kubeadm-1node
+
+# Map "cp" (the --node-name) and "k8scp" (the controlPlaneEndpoint in
+# kubeadm-config.yaml) to this node's MAIN interface IP — the source address of
+# the default route — so kubeadm's certs/API server resolve them (step1.md does
+# this by hand via `vim /etc/hosts`).
+IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
+[ -n "$IP" ] || IP=$(hostname -i | awk '{print $1}')
+for NAME in cp k8scp; do
+  grep -q " $NAME\$" /etc/hosts || echo "$IP $NAME" >> /etc/hosts
+done
+
+# containerd is a systemd service now; give it a moment to accept CRI calls so
+# kubeadm's runtime probe doesn't race a still-starting daemon.
+echo 'Waiting for containerd...'
+until crictl info >/dev/null 2>&1; do sleep 1; done
+
+echo 'Initialising the control plane with kubeadm (this takes a couple of minutes)...'
+kubeadm init --config="$CFG/kubeadm-config.yaml" --upload-certs --node-name=cp \
+  | tee /var/log/kubeadm-init.out
+
+# kubeconfig for root (matches $KUBECONFIG baked into the image).
+mkdir -p /root/.kube
+cp -f /etc/kubernetes/admin.conf /root/.kube/config
+
+# Single node: let workloads schedule on the control plane.
+kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
+
+echo 'Installing the Cilium CNI...'
+kubectl apply -f "$CFG/cilium-cni.yaml"
+
+echo 'Waiting for the node to become Ready (Cilium must be up first)...'
+kubectl wait --for=condition=Ready node --all --timeout=300s
+
+echo 'Waiting for the Cilium components to be ready...'
+kubectl -n kube-system rollout status daemonset/cilium --timeout=300s
+kubectl -n kube-system rollout status deployment/cilium-operator --timeout=300s
+
+echo 'Cluster is ready.'
