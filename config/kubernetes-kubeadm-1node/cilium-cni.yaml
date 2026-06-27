@@ -219,7 +219,11 @@ data:
   hubble-tls-client-ca-files: /var/lib/cilium/tls/hubble/client-ca.crt
   ipam: "cluster-pool"
   ipam-cilium-node-update-rate: "15s"
-  cluster-pool-ipv4-cidr: "192.168.0.0/16"  
+  # Must match podSubnet in kubeadm-config.yaml. Kept off 192.168.0.0/16 so it
+  # doesn't overlap a typical 192.168.x host LAN (that overlap makes Cilium route
+  # replies to the host into cilium_host instead of eth0, breaking access to
+  # published ports from the host/LAN).
+  cluster-pool-ipv4-cidr: "10.244.0.0/16"
   cluster-pool-ipv4-mask-size: "24"
   egress-gateway-reconciliation-trigger-interval: "1s"
   enable-vtep: "false"

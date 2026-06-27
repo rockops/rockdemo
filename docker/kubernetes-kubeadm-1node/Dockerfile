@@ -43,6 +43,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
  && apt-get install -y --no-install-recommends \
       apt-transport-https \
       software-properties-common \
+      bash-completion \
       containerd \
       conntrack \
       socat \
@@ -93,6 +94,23 @@ WORKDIR /root
 # So kubectl in the interactive shell finds the cluster immediately once
 # startup.sh has copied the admin kubeconfig here.
 ENV KUBECONFIG=/root/.kube/config
+
+# kubectl bash completion + a `k` alias, wired so completion works for BOTH
+# `kubectl` and `k` (the `complete -F __start_kubectl k` line re-points the alias
+# at kubectl's completion function). Appended to root's .bashrc, sourced by the
+# interactive `docker exec ... bash` shell rockDemo attaches.
+RUN { \
+      echo ''; \
+      echo '# rockDemo: kubectl completion + k alias'; \
+      echo '# kubectl completion needs the bash-completion helpers (e.g.'; \
+      echo '# _get_comp_words_by_ref); load them first if not already sourced.'; \
+      echo 'if ! type _get_comp_words_by_ref >/dev/null 2>&1; then'; \
+      echo '  [ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion'; \
+      echo 'fi'; \
+      echo 'source <(kubectl completion bash)'; \
+      echo 'alias k=kubectl'; \
+      echo 'complete -o default -F __start_kubectl k'; \
+    } >> /root/.bashrc
 
 # Inherit systemd as PID 1 (CMD ["/sbin/init"]) from the base image — no
 # ENTRYPOINT override, so the node boots like a real host.

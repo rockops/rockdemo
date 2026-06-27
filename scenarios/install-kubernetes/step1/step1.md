@@ -106,7 +106,7 @@ kind: ClusterConfiguration
 kubernetesVersion: 1.33.1 #<-- Use the word stable for newest version
 controlPlaneEndpoint: "k8scp:6443" #<-- Use the alias we put in /etc/hosts not the IP
 networking:
-  podSubnet: 192.168.0.0/16
+  podSubnet: 10.244.0.0/16 #<-- Avoid 192.168.0.0/16: it overlaps a typical LAN and breaks host access to published ports
 ---
 # kube-proxy runs in this node's own network namespace, which can't write the
 # global net/netfilter/nf_conntrack_max sysctl (permission denied, even when
