@@ -164,6 +164,7 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
 | Field | Meaning |
 | --- | --- |
 | `imageid` | Docker image to run for this node. |
+| `alias` | Optional. An alternate name a scenario may use to target this node — for `details.assets` keys and a step's `host`. Lets one scenario JSON run across backends whose real node names differ (e.g. alias `node1` → real node `controlplane`). |
 | `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
 | `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
@@ -210,14 +211,24 @@ The node name becomes the container **hostname** (visible in the shell prompt).
 > When a step has **both** `verify` and `foreground`, NEXT is hidden+disabled
 > until verify passes **and** the foreground command finishes.
 
+> **Non-executable scripts just work.** When a `background`/`foreground`/`verify`
+> value invokes a script *file* by name — `verify.sh`, `./foreground.sh`, even
+> with arguments (`verify.sh --flag`) — rockDemo runs an **executable copy** of
+> it: the file is copied into the ephemeral `.rockdemo-run` scratch, `chmod +x`'d
+> there, and bind-mounted back over its own `/scenario` path. So it runs via its
+> shebang (any interpreter) without you needing to `chmod +x` it, and **your
+> source file is never modified**. (A wrapped form like `sh foreground.sh` never
+> needed this.) The copy is taken at launch, so editing such a script mid-run
+> takes effect on the next **RESTART**.
+
 The **scenario folder is bind-mounted read-only at `/scenario`** in every
 container, so scenario scripts are available to run (and `foreground`/`verify`
 run from there with `.` on `PATH`). Read-only keeps your host files safe.
 
 #### `details.assets`
 
-Each key is a **node name** (must match a node / `backend` host) and maps to a
-list of asset rules:
+Each key is a **node name** (must match a node / `backend` host — a node's
+`alias` works too) and maps to a list of asset rules:
 
 - `file` — glob of host **files** to stage, resolved **relative to the
   scenario's `assets/` folder** (`<scenario>/assets/`). See globbing below.
@@ -272,6 +283,37 @@ The scratch dir is re-created fresh on every open/RESTART and **deleted when
 the demo ends**. It's gitignored (`.rockdemo-run/`).
 
 A working example lives in [scenarios/simple/index.json](https://github.com/rockops/rockdemo/blob/main/scenarios/simple/index.json).
+
+### Network traffic (`{{TRAFFIC_…}}` links)
+
+To link to a service running **inside** a node, scenario markdown can use a
+Killercoda-style placeholder:
+
+```markdown
+[ACCESS NGINX]({{TRAFFIC_HOST1_80}})
+```
+
+`{{TRAFFIC_<host>_<port>}}` is rewritten to a working URL,
+`http://<host-machine-hostname>:<port>`, where:
+
+- **`TRAFFIC`** is the fixed prefix.
+- **`<host>`** names the node — its real name, its `alias`, or an implicit
+  positional name **`hostN`** / **`host0N`** (1-based, case-insensitive): for the
+  first node `host1` = `HOST1` = `host01` all work.
+- **`<port>`** is any port number.
+- the hostname is the machine running rockDemo (the `hostname` command), since
+  that's where the port is reachable — **not** the container's hostname.
+
+rockDemo scans the scenario's markdown up front and publishes each referenced
+port from that node with `docker run -p <port>:<port>`, so the URL reaches the
+service. Notes:
+
+- The **host port equals the placeholder port** (no remapping). If that port is
+  already taken on the host — or two nodes request the same one — `docker run`
+  fails loudly (by design).
+- Ports are published at container launch, so **adding or changing a
+  `{{TRAFFIC_…}}` port takes effect on the next RESTART**, not a live save.
+- A token whose `<host>` doesn't match any node is left as-is.
 
 ## Backends
 

@@ -48,4 +48,13 @@ echo 'Waiting for the Cilium components to be ready...'
 kubectl -n kube-system rollout status daemonset/cilium --timeout=300s
 kubectl -n kube-system rollout status deployment/cilium-operator --timeout=300s
 
+# Storage: install the Rancher local-path provisioner (bundled, version-pinned
+# alongside this script) and make it the default StorageClass, so PVCs bind out
+# of the box on this single node.
+echo 'Installing the local-path storage provisioner...'
+kubectl apply -f "$CFG/local-path-storage.yaml"
+kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+kubectl patch storageclass local-path \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
 echo 'Cluster is ready.'

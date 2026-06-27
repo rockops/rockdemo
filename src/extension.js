@@ -1,7 +1,9 @@
 const vscode = require("vscode");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const execFile = require("util").promisify(require("child_process").execFile);
+const { execFileSync } = require("child_process");
 
 // Extension install location, set in activate(). Used to resolve vendored
 // webview assets (media/) such as the bundled syntax highlighter.
@@ -224,7 +226,7 @@ function ensureNetworkCmd() {
  * start), which is the default for simple scenarios. Returns a record:
  * { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
@@ -233,6 +235,11 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   const vol = (mounts || [])
     .map((m) => `-v "${m.host}:${m.container}${m.ro ? ":ro" : ""}"`)
     .join(" ");
+  // Publish each {{TRAFFIC_*}} port to the same host port (-p <port>:<port>) so
+  // the placeholder's URL (http://<host>:<port>) reaches the service. A port
+  // already taken on the host — or two nodes wanting the same one — makes
+  // `docker run` fail loudly, which is the intended, visible behaviour.
+  const pub = (ports || []).map((p) => `-p ${p}:${p}`).join(" ");
   // Join the shared network so nodes can reach each other; pin the static IP
   // when one is declared.
   const netEnsure = useNet ? ensureNetworkCmd() : "";
@@ -272,7 +279,7 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // persisting them. Non-systemd mode is unchanged: the shell is PID 1.
   const runArgs =
     `--label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ` +
-    `${priv}${netArgs}${vol} ${imageid}`;
+    `${priv}${netArgs}${pub ? pub + " " : ""}${vol} ${imageid}`;
   const launch = systemd
     ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
       `docker exec -it ${containerName} ${shell}`
@@ -311,6 +318,7 @@ function loadBackends() {
 function nodesFromMap(nodes) {
   return Object.keys(nodes).map((name) => ({
     name,
+    alias: nodes[name].alias || null,
     imageid: nodes[name].imageid,
     cmd: nodes[name].cmd,
     ip: nodes[name].ip,
@@ -354,18 +362,27 @@ function startNodes(entry) {
   entry.bgDone = new Set(); // re-arm background scripts for this run
   entry.fgDone = new Set(); // re-arm foreground scripts for this run
   entry.fgPending = new Map(); // re-arm the per-screen foreground gates
-  if (entry.baseFsPath) wipeRunDir(entry.baseFsPath);
+  // Which ports each node must publish to the host, from {{TRAFFIC_*}} tokens.
+  entry.trafficPorts = collectTrafficPorts(entry);
+  // Which script files each node invokes by name (need an executable overlay).
+  entry.scriptFiles = collectScriptFiles(entry);
+  if (entry.baseFsPath) wipeRunDir(entry.baseFsPath, firstNodeImage(entry));
   // Warn about asset blocks keyed to a node that doesn't exist — otherwise the
   // assets silently never stage (a recurring "no files in the container" trap,
   // e.g. an "host01" key when the backend node is "node1").
   if (entry.assets) {
-    const nodeNames = new Set(entry.nodes.map((n) => n.name));
-    const orphans = Object.keys(entry.assets).filter((k) => !nodeNames.has(k));
+    // A key is valid if it matches a node's real name OR its alias.
+    const orphans = Object.keys(entry.assets).filter(
+      (k) => !entry.nodes.some((n, idx) => nodeMatches(n, idx, k))
+    );
     if (orphans.length) {
+      const available = entry.nodes
+        .map((n) => (n.alias ? `${n.name} (alias ${n.alias})` : n.name))
+        .join(", ");
       vscode.window.showWarningMessage(
         `rockDemo: assets for ${orphans.map((o) => `"${o}"`).join(", ")} ` +
           `won't be copied — no such node. Available nodes: ` +
-          `${[...nodeNames].join(", ") || "none"}.`
+          `${available || "none"}.`
       );
     }
   }
@@ -388,7 +405,11 @@ function startNodes(entry) {
       if (n.background || n.foreground) {
         mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
       }
-      return startNamedContainer(n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd);
+      // Overlay executable copies of any scripts this node invokes by name, so a
+      // non-executable source script still runs (without touching the source).
+      mounts.push(...stageNodeScripts(entry, n));
+      const ports = entry.trafficPorts.get(n.name) || [];
+      return startNamedContainer(n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports);
     });
   // VS Code makes the most-recently-created terminal the active one, and that
   // selection is applied asynchronously — so a synchronous show() of the first
@@ -484,7 +505,13 @@ function disposeEntryTerminals(entry) {
   }
   entry.terminals = [];
   // Delete the staged asset copies — they're scratch, no post-mortem needed.
-  if (entry.baseFsPath) wipeRunDir(entry.baseFsPath);
+  if (entry.baseFsPath) wipeRunDir(entry.baseFsPath, firstNodeImage(entry));
+}
+
+/** The first node's image (cached, so the cleanup container needs no pull). */
+function firstNodeImage(entry) {
+  const n = (entry.nodes || []).find((x) => x.imageid);
+  return n ? n.imageid : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,12 +552,37 @@ function trackActivePanel(panel) {
 
 const RUN_DIR = ".rockdemo-run"; // gitignored scratch root inside a scenario
 
-/** Remove a scenario's entire scratch dir (best-effort). */
-function wipeRunDir(baseFsPath) {
+/**
+ * Remove a scenario's entire scratch dir (best-effort). A privileged container
+ * runs as root and may have written **root-owned** files into the bind-mounted
+ * scratch copy (e.g. /root/.kube, /root/.ssh), which the host user can't delete
+ * — so a plain rmSync leaves `.rockdemo-run` behind. When that happens, fall
+ * back to deleting it from inside a throwaway container, where the process is
+ * root (the Docker daemon runs as root). Reuses the node's own image so there's
+ * nothing extra to pull; `image` is optional and defaults to alpine.
+ */
+function wipeRunDir(baseFsPath, image) {
+  const runDir = path.join(baseFsPath, RUN_DIR);
   try {
-    fs.rmSync(path.join(baseFsPath, RUN_DIR), { recursive: true, force: true });
+    fs.rmSync(runDir, { recursive: true, force: true });
   } catch (err) {
-    /* nothing to clean — ignore */
+    /* likely root-owned files — handled by the container fallback below */
+  }
+  if (!fs.existsSync(runDir)) return; // gone — host could delete it
+  try {
+    // Run `rm -rf` as root in a container, with the scenario dir bind-mounted.
+    execFileSync(
+      "docker",
+      [
+        "run", "--rm", "--label", ROCKDEMO_LABEL,
+        "-v", `${baseFsPath}:/scratch`,
+        image || "alpine",
+        "rm", "-rf", `/scratch/${RUN_DIR}`,
+      ],
+      { stdio: "ignore", timeout: 60000 }
+    );
+  } catch (err) {
+    /* docker missing / offline — leave the dir rather than fail teardown */
   }
 }
 
@@ -623,30 +675,191 @@ function expandGlob(rootDir, pattern) {
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * A `background`/`foreground` value may be a script file (path relative to
- * index.json) whose contents are run, or a literal shell command. Returns the
- * script to execute.
- */
-function resolveScript(baseFsPath, value) {
+/** First whitespace-separated token of a command, with a leading "./" stripped. */
+function firstScriptToken(value) {
+  return String(value || "").trim().split(/\s+/)[0].replace(/^\.\//, "");
+}
+
+/** Absolute path of `rel` if it resolves to a file inside the scenario, else null. */
+function fileWithin(baseFsPath, rel) {
+  if (!baseFsPath || !rel) return null;
+  let abs;
   try {
-    const abs = path.resolve(baseFsPath, value);
-    if (fs.statSync(abs).isFile()) return fs.readFileSync(abs, "utf8");
+    abs = path.resolve(baseFsPath, rel);
   } catch (err) {
-    /* not a file — treat as a literal command */
+    return null;
   }
-  return value;
+  const root = path.resolve(baseFsPath);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null; // stay inside
+  try {
+    return fs.statSync(abs).isFile() ? abs : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * A foreground/background/verify value may invoke a script *file* by name
+ * (possibly with arguments, e.g. "verify.sh --flag"), so its execute bit
+ * matters — but authors often forget `chmod +x`, and the scenario is mounted
+ * read-only so the container can't fix it. We must not touch the source file
+ * either. Returns the script's path relative to the scenario for such values,
+ * or null when the first token isn't a scenario file (e.g. "sh x.sh" or
+ * "kubectl get pods" — nothing to make executable). Used to stage an executable
+ * copy of the script and bind-mount it back over /scenario (see stageNodeScripts).
+ */
+function invokedScriptRel(baseFsPath, value) {
+  const tok = firstScriptToken(value);
+  return fileWithin(baseFsPath, tok) ? tok : null;
+}
+
+/**
+ * Every name a node answers to, lowercased for case-insensitive matching:
+ *  - its real name (e.g. "controlplane"),
+ *  - its optional `alias` (e.g. "node1"),
+ *  - the implicit Killercoda-style positional aliases `hostN` and `host0N`,
+ *    where N is the node's 1-based position among the backend's nodes.
+ * So the same scenario JSON targets a node across backends with different node
+ * names — `host1`, `HOST01`, an alias, or the real name all resolve.
+ */
+function nodeRefs(node, index) {
+  const n = index + 1;
+  const refs = [node.name];
+  if (node.alias) refs.push(node.alias);
+  refs.push(`host${n}`, `host${String(n).padStart(2, "0")}`);
+  return refs.map((r) => String(r).toLowerCase());
+}
+
+/** Does node #index answer to `ref` (name / alias / implicit hostN / host0N)? */
+function nodeMatches(node, index, ref) {
+  return nodeRefs(node, index).includes(String(ref).toLowerCase());
+}
+
+/** Find the node a scenario reference points to (or null). */
+function findNode(entry, ref) {
+  const nodes = entry.nodes || [];
+  const i = nodes.findIndex((n, idx) => nodeMatches(n, idx, ref));
+  return i === -1 ? null : nodes[i];
 }
 
 /**
  * Pick the target node terminal record for a background command: the named
- * `host` if given, otherwise the first node (works for both backendExtended
- * and the single `backend`).
+ * `host` if given (matched by name / alias / implicit hostN), otherwise the
+ * first node (works for both backendExtended and the single `backend`).
  */
 function pickHost(entry, host) {
   const recs = entry.terminals || [];
-  if (host) return recs.find((r) => r.name === host) || null;
+  if (host) {
+    const node = findNode(entry, host);
+    return node ? recs.find((r) => r.name === node.name) || null : null;
+  }
   return recs[0] || null;
+}
+
+// Killercoda-style traffic placeholder: `{{TRAFFIC_<host>_<port>}}` in scenario
+// markdown becomes a URL that reaches <port> on the named node. <host> is a node
+// ref (name / alias / implicit hostN); <port> is any port number. The host token
+// excludes `{`/`}`/`_` so adjacent placeholders on a line never merge.
+const TRAFFIC_RE = /\{\{TRAFFIC_([A-Za-z0-9.-]+)_(\d+)\}\}/g;
+
+/**
+ * Scan a scenario's intro/step/finish markdown for `{{TRAFFIC_<host>_<port>}}`
+ * placeholders and return a map of node name -> sorted unique port list, so each
+ * node's container can publish exactly the ports its scenario references. Reads
+ * the markdown straight off disk (sync) — this runs before the containers launch.
+ */
+function collectTrafficPorts(entry) {
+  const byNode = new Map();
+  if (!entry.baseFsPath) return byNode;
+  const details = (entry.scenario && entry.scenario.details) || {};
+  const rels = [];
+  if (details.intro && details.intro.text) rels.push(details.intro.text);
+  for (const s of details.steps || []) if (s.text) rels.push(s.text);
+  if (details.finish && details.finish.text) rels.push(details.finish.text);
+
+  for (const rel of rels) {
+    let text;
+    try {
+      text = fs.readFileSync(path.join(entry.baseFsPath, rel), "utf8");
+    } catch (err) {
+      continue; // missing step file — buildScenario already surfaces that
+    }
+    let m;
+    TRAFFIC_RE.lastIndex = 0;
+    while ((m = TRAFFIC_RE.exec(text))) {
+      const node = findNode(entry, m[1]);
+      const port = Number(m[2]);
+      if (!node || !port) continue;
+      if (!byNode.has(node.name)) byNode.set(node.name, new Set());
+      byNode.get(node.name).add(port);
+    }
+  }
+  // Freeze each node's set into a sorted number array.
+  const out = new Map();
+  for (const [name, set] of byNode) out.set(name, [...set].sort((a, b) => a - b));
+  return out;
+}
+
+/** Resolve a step's `host` to a node (by name/alias/implicit), else the first node. */
+function nodeForHost(entry, host) {
+  if (host) return findNode(entry, host);
+  return (entry.nodes || [])[0] || null;
+}
+
+/**
+ * Pre-scan the scenario's intro/step commands for script *files* invoked by name
+ * (so they need an executable overlay — see stageNodeScripts) and map each to its
+ * target node. foreground/verify always invoke by name; `background` only does so
+ * in the "script.sh args" form (a bare file is run by inlining its contents, so
+ * it needs no execute bit). Returns Map<nodeName, relpath[]> (deduped).
+ */
+function collectScriptFiles(entry) {
+  const byNode = new Map();
+  if (!entry.baseFsPath) return byNode;
+  const base = entry.baseFsPath;
+  const details = (entry.scenario && entry.scenario.details) || {};
+  const screens = [];
+  if (details.intro) screens.push(details.intro);
+  for (const s of details.steps || []) screens.push(s);
+
+  const add = (name, rel) => {
+    if (!byNode.has(name)) byNode.set(name, new Set());
+    byNode.get(name).add(rel);
+  };
+  for (const cfg of screens) {
+    const node = nodeForHost(entry, cfg.host);
+    if (!node) continue;
+    for (const field of ["foreground", "verify"]) {
+      const rel = invokedScriptRel(base, cfg[field]);
+      if (rel) add(node.name, rel);
+    }
+    // background: a bare file is inlined (no exec bit needed); only "file args"
+    // is invoked by name.
+    if (cfg.background && !fileWithin(base, String(cfg.background).trim())) {
+      const rel = invokedScriptRel(base, cfg.background);
+      if (rel) add(node.name, rel);
+    }
+  }
+  const out = new Map();
+  for (const [name, set] of byNode) out.set(name, [...set]);
+  return out;
+}
+
+/**
+ * Replace `{{TRAFFIC_<host>_<port>}}` placeholders in a markdown body with a
+ * working URL: `http://<host machine hostname>:<port>`. The hostname is the
+ * host running rockDemo (os.hostname(), i.e. the `hostname` command) — not the
+ * container — because the published port is reachable there. Each referenced
+ * port is published from the node with `-p <port>:<port>` (see startNodes), so
+ * the host port equals the placeholder's port. Tokens whose host doesn't resolve
+ * to a node are left untouched.
+ */
+function substituteTraffic(md, entry) {
+  const hostname = os.hostname();
+  return md.replace(TRAFFIC_RE, (whole, ref, port) => {
+    const node = findNode(entry, ref);
+    return node ? `http://${hostname}:${port}` : whole;
+  });
 }
 
 /**
@@ -678,14 +891,27 @@ async function runBackground(entry, stepId) {
     return;
   }
 
-  const script = resolveScript(entry.baseFsPath, cfg.background);
   const scenarioName = path.basename(entry.baseFsPath);
   const label = stepId === "intro" ? "intro" : String(Number(stepId) + 1);
   const logDir = `/var/log/rockdemo/${scenarioName}`;
   const logFile = `${logDir}/${label}_background.log`;
-  // A subshell groups the (possibly multi-line) script; redirection captures
-  // its output to the log file inside the container. `docker exec -d` detaches.
-  const wrapped = `mkdir -p ${logDir}; ( ${script}\n) > ${logFile} 2>&1`;
+  // A subshell groups the script; redirection captures its output to the log
+  // file inside the container. `docker exec -d` detaches.
+  const wholeFile = fileWithin(entry.baseFsPath, String(cfg.background).trim());
+  let body;
+  if (wholeFile) {
+    // The whole value is a script file: inline its contents, so it runs even
+    // without a shebang or an execute bit (the long-standing behaviour).
+    body = `( ${fs.readFileSync(wholeFile, "utf8")}\n)`;
+  } else if (fileWithin(entry.baseFsPath, firstScriptToken(cfg.background))) {
+    // "script.sh args": run from /scenario (with "." on PATH) so the script —
+    // now executable — is found and run via its shebang.
+    body = `( cd /scenario && export PATH=".:$PATH"; ${cfg.background} )`;
+  } else {
+    // A plain shell command.
+    body = `( ${cfg.background}\n)`;
+  }
+  const wrapped = `mkdir -p ${logDir}; ${body} > ${logFile} 2>&1`;
 
   // The container is launched in its terminal and may still be pulling its
   // image, so retry the exec until it succeeds (or give up after ~2 min).
@@ -992,7 +1218,15 @@ function stageRuleInto(assetsRoot, scratchDir, nodeName, rule) {
  * the host copy for {{open}}.
  */
 function stageNodeAssets(entry, node) {
-  const rules = (entry.assets && entry.assets[node.name]) || [];
+  // Assets may be keyed by the node's real name, its alias, or an implicit
+  // positional name (host1/host01) — e.g. a scenario targets "node1" while this
+  // backend's node is "controlplane".
+  const nodeIdx = (entry.nodes || []).indexOf(node);
+  let rules = [];
+  if (entry.assets) {
+    const key = Object.keys(entry.assets).find((k) => nodeMatches(node, nodeIdx, k));
+    if (key) rules = entry.assets[key];
+  }
   const assetsRoot = path.join(entry.baseFsPath, "assets");
   const safeNode = node.name.replace(/[^a-zA-Z0-9_.-]/g, "_");
   // Group rules by target, preserving first-seen order.
@@ -1013,6 +1247,39 @@ function stageNodeAssets(entry, node) {
     if (!staged) continue;
     const ro = group.every((r) => r.chmod === "+r");
     mounts.push({ host: scratchDir, container: normalizeContainerPath(target), ro });
+  }
+  return mounts;
+}
+
+/**
+ * Stage executable copies of the script files a node's intro/step
+ * background/foreground/verify commands invoke by name, and bind-mount each copy
+ * **back over its own /scenario path**. The scenario itself is mounted read-only
+ * and we must not modify the author's source, so we can't just `chmod +x` the
+ * original — instead we copy it into the ephemeral .rockdemo-run scratch, mark
+ * the *copy* executable, and overlay it. The command still runs from /scenario
+ * with the same relative path, now executable, via its own shebang (any
+ * interpreter). Returns the overlay mount descriptors.
+ */
+function stageNodeScripts(entry, node) {
+  const rels = (entry.scriptFiles && entry.scriptFiles.get(node.name)) || [];
+  if (!rels.length) return [];
+  const safeNode = node.name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const scriptsRoot = path.join(entry.baseFsPath, RUN_DIR, safeNode, "scripts");
+  const mounts = [];
+  for (const rel of rels) {
+    const src = fileWithin(entry.baseFsPath, rel);
+    if (!src) continue;
+    const dst = path.join(scriptsRoot, rel);
+    try {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+      fs.chmodSync(dst, fs.statSync(dst).mode | 0o111); // +x on the copy only
+    } catch (err) {
+      continue; // best-effort — fall back to the read-only original
+    }
+    // Overlay the executable copy at the script's own path inside /scenario.
+    mounts.push({ host: dst, container: `/scenario/${rel}`, ro: true });
   }
   return mounts;
 }
@@ -1920,6 +2187,8 @@ async function buildScenario(jsonDoc, nodes) {
   // Any node carrying a backend-level foreground gates the intro START button
   // until it finishes (same as an intro foreground does).
   const backendFg = (nodes || []).some((n) => n.foreground);
+  // Pseudo-entry for {{TRAFFIC_*}} resolution (findNode only needs `nodes`).
+  const ti = { nodes: nodes || [] };
   const stepDefs = details.steps || [];
 
   const steps = [];
@@ -1934,7 +2203,7 @@ async function buildScenario(jsonDoc, nodes) {
     }
     steps.push({
       title: sd.title,
-      md,
+      md: substituteTraffic(md, ti),
       baseStr: stepDir.toString(),
       verify: sd.verify || null,
       foreground: !!sd.foreground,
@@ -1946,7 +2215,7 @@ async function buildScenario(jsonDoc, nodes) {
     const introUri = vscode.Uri.joinPath(dir, details.intro.text);
     try {
       intro = {
-        md: await readText(introUri),
+        md: substituteTraffic(await readText(introUri), ti),
         baseStr: vscode.Uri.joinPath(introUri, "..").toString(),
       };
     } catch (err) {
@@ -1957,7 +2226,7 @@ async function buildScenario(jsonDoc, nodes) {
   let finish = null;
   if (details.finish && details.finish.text) {
     try {
-      finish = await readText(vscode.Uri.joinPath(dir, details.finish.text));
+      finish = substituteTraffic(await readText(vscode.Uri.joinPath(dir, details.finish.text)), ti);
     } catch (err) {
       finish = null;
     }

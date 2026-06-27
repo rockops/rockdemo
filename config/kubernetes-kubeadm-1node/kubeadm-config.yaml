@@ -3,7 +3,13 @@ kind: ClusterConfiguration
 kubernetesVersion: 1.33.1 #<-- Use the word stable for newest version
 controlPlaneEndpoint: "k8scp:6443" #<-- Use the alias we put in /etc/hosts not the IP
 networking:
-  podSubnet: 192.168.0.0/16
+  # Pod CIDR. Kept off 192.168.0.0/16 on purpose: that overlaps the typical home
+  # LAN (192.168.0.0/24), which makes Cilium route replies to the host back into
+  # cilium_host instead of out eth0 — breaking access to published ports from the
+  # host/LAN. 10.244.0.0/16 is the conventional kubeadm pod CIDR and collides with
+  # neither the rockdemo docker network (172.30.0.0/16) nor a 192.168.x LAN.
+  # MUST match cluster-pool-ipv4-cidr in cilium-cni.yaml.
+  podSubnet: 10.244.0.0/16
 ---
 # kube-proxy runs in this node's own network namespace, which can't write the
 # global net/netfilter/nf_conntrack_max sysctl (permission denied, even when
