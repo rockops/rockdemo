@@ -12,6 +12,7 @@ on:
     paths:
       - docker/ubuntu/**
       - docker/ubuntu-systemd/**
+      - docker/kubernetes-kubeadm-1node/**
       - .github/workflows/docker-image.yml
   workflow_dispatch: # allow manual rebuilds from the Actions tab
 
@@ -28,6 +29,9 @@ jobs:
         include:
           - { dir: ubuntu, name: ubuntu }
           - { dir: ubuntu-systemd, name: ubuntu-systemd }
+          # FROM ghcr.io/<owner>/rockdemo/ubuntu-systemd:24.04 — relies on a
+          # previously-published base image (rebuild base first if both change).
+          - { dir: kubernetes-kubeadm-1node, name: kubernetes-kubeadm-1node }
     steps:
       - uses: actions/checkout@v5
 
