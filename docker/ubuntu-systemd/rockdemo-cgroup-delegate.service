@@ -1,0 +1,20 @@
+# Seed cgroup v2 controller delegation at early boot, while the container's root
+# cgroup is still clean, so a nested kubelet can later create kubepods.slice
+# with its controllers. Runs before anything drops a process into the root
+# cgroup (interactive shells, kubelet). See rockdemo-cgroup-delegate.sh for the
+# full why. The same script also runs as a kubelet ExecStartPre to re-arm/
+# recover right before each kubelet start.
+[Unit]
+Description=Enable cgroup v2 controller delegation for nested kubelet
+DefaultDependencies=no
+After=sysinit.target
+Before=basic.target
+ConditionPathExists=/sys/fs/cgroup/cgroup.controllers
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rockdemo-cgroup-delegate.sh
+
+[Install]
+WantedBy=sysinit.target

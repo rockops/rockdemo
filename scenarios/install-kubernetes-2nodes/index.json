@@ -1,0 +1,20 @@
+{
+    "title": "Installation kubernetes",
+    "description": "Install Kubernetes with kubeadm",
+    "details": {
+      "steps": [
+        {
+          "title": "Premieres commandes",
+          "text": "step1/step1.md"
+        }
+      ],
+      "assets": {
+        "controlplane": [
+          {"file": "*", "target": "/root","chmod":"+w"}
+        ]
+      }
+    },
+    "backend": {
+      "imageid": "kubernetes-kubeadm-2nodes"
+    }
+}

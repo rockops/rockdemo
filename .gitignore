@@ -18,5 +18,6 @@ node_modules/
 scenario-examples/
 
 # Linux Foundation LFS458 course solutions — kept local, not redistributed
-scenarios/install-kubernetes/LFS458/
-scenarios/install-kubernetes/LFS458_V1.34.1-u1_SOLUTIONS.tar.xz
+# (any scenario: install-kubernetes, install-kubernetes-2nodes, …)
+scenarios/*/LFS458/
+scenarios/*/LFS458_V1.34.1-u1_SOLUTIONS.tar.xz
