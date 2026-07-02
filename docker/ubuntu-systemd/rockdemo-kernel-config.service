@@ -1,0 +1,17 @@
+# Write a kernel config file kubeadm's SystemVerification can read, so the stock
+# `kubeadm join`/`init` runs in a container without
+# `--ignore-preflight-errors=SystemVerification`. Runs at boot, before the user
+# invokes kubeadm. See rockdemo-kernel-config.sh for the full why.
+[Unit]
+Description=Provide a kernel config for kubeadm SystemVerification (containerised node)
+DefaultDependencies=no
+After=sysinit.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rockdemo-kernel-config.sh
+
+[Install]
+WantedBy=multi-user.target

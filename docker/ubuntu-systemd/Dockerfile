@@ -72,6 +72,46 @@ RUN systemctl enable rockdemo-rshared.service
 COPY rockdemo-resolv.service /etc/systemd/system/rockdemo-resolv.service
 RUN systemctl enable rockdemo-resolv.service
 
+# Make cgroup v2 controller delegation work in a private cgroup namespace so a
+# nested kubelet can create kubepods.slice with its controllers (cpu/cpuset/
+# memory/pids/hugetlb). Without this the kubelet aborts: "kubepods has some
+# missing controllers". Three cooperating pieces (see the .sh for the full why):
+#   1. Accounting defaults — systemd keeps cpu/memory/io/pids delegated, so the
+#      root cgroup never goes empty (which is what lets a stray shell get
+#      trapped in it and block everything).
+#   2. A boot oneshot — seeds ALL controllers (incl. cpuset/hugetlb) at early
+#      boot while the root cgroup is still clean.
+#   3. A shell self-heal (below) — relocates an interactive shell that lost the
+#      boot race and landed in the root cgroup, then enables delegation.
+COPY rockdemo-accounting.conf /etc/systemd/system.conf.d/10-rockdemo-accounting.conf
+COPY rockdemo-cgroup-delegate.sh /usr/local/bin/rockdemo-cgroup-delegate.sh
+RUN chmod +x /usr/local/bin/rockdemo-cgroup-delegate.sh
+COPY rockdemo-cgroup-delegate.service /etc/systemd/system/rockdemo-cgroup-delegate.service
+RUN systemctl enable rockdemo-cgroup-delegate.service
+# Self-heal the boot race: the interactive shell attaches before the seed runs
+# and lands in the cgroup root, blocking delegation. This snippet (sourced by
+# every interactive shell, login or not) moves the shell out of the root cgroup
+# and enables delegation when it detects it's trapped there. No-op otherwise.
+COPY rockdemo-cgroup-shell.sh /etc/profile.d/rockdemo-cgroup-shell.sh
+RUN printf '\n[ -f /etc/profile.d/rockdemo-cgroup-shell.sh ] && . /etc/profile.d/rockdemo-cgroup-shell.sh\n' >> /etc/bash.bashrc
+
+# Let kubeadm's SystemVerification read a kernel config, so the stock
+# `kubeadm join`/`init` runs in a container without
+# `--ignore-preflight-errors=SystemVerification`. See the .sh for the full why.
+COPY rockdemo-kernel-config.sh /usr/local/bin/rockdemo-kernel-config.sh
+RUN chmod +x /usr/local/bin/rockdemo-kernel-config.sh
+COPY rockdemo-kernel-config.service /etc/systemd/system/rockdemo-kernel-config.service
+RUN systemctl enable rockdemo-kernel-config.service
+
+# Every container cloned from this image MUST get a unique /etc/machine-id.
+# Kubernetes derives a node's machineID/systemUUID from it, so when two nodes
+# (control plane + worker) boot from the same image with an identical id, they
+# collide: the joining node and the control plane share an identity, the
+# control-plane node flips NotReady, and its pods (incl. the API server) get
+# evicted. CNI-independent — it breaks Cilium and Flannel alike. An EMPTY
+# machine-id makes systemd generate a fresh one per container at first boot.
+RUN rm -f /var/lib/dbus/machine-id && : > /etc/machine-id
+
 # Clean shutdown signal for systemd (so `docker stop` ends it gracefully).
 STOPSIGNAL SIGRTMIN+3
 

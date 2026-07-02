@@ -92,7 +92,7 @@ click **▶ Run demo** in the title bar to launch the **scenario player**:
    - With a single `backend.imageid`, the image id is looked up in the bundled
      default profiles (see [Backends](#backends)).
    - With `backendExtended.nodes`, **one terminal per node** is opened, each
-     named after its node key. `backendExtended` takes precedence over
+     named after its `name`. `backendExtended` takes precedence over
      `backend` when present.
 3. Clicking **START** walks through `details.steps` in order. Each step's
    markdown is rendered with the demo player and gets navigation at the bottom
@@ -142,10 +142,10 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
   },
   "backend": { "imageid": "ubuntu" },
   "backendExtended": {
-    "nodes": {
-      "host1": { "imageid": "alpine", "cmd": "sh", "ip": "172.30.1.2" },
-      "host2": { "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "cmd": "bash", "ip": "172.30.2.2", "docker": true }
-    }
+    "nodes": [
+      { "name": "host1", "imageid": "alpine", "cmd": "sh", "ip": "172.30.1.2" },
+      { "name": "host2", "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "cmd": "bash", "ip": "172.30.2.2", "docker": true }
+    ]
   }
 }
 ```
@@ -155,9 +155,12 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
 - `title` / `description` — shown on the intro screen.
 - `backend.imageid` — a **key** into the bundled default profiles
   (see [Backends](#backends)).
-- `backendExtended.nodes` — explicit multi-container map; **takes precedence**
-  over `backend` when present. Each key is a node name (used as the terminal
-  name, container hostname, and `host:` selector).
+- `backendExtended.nodes` — explicit multi-container **ordered list**; **takes
+  precedence** over `backend` when present. Each entry's `name` is the node name
+  (used as the terminal name, container hostname, and `host:` selector). The list
+  order defines the implicit positional aliases `host1`/`host01`, `host2`/
+  `host02`, … (a legacy `{ name: {…} }` map is still accepted, but a map has no
+  guaranteed order — prefer the list).
 
 #### Per-node fields (both `backends.json` profiles and `backendExtended`)
 
@@ -325,11 +328,17 @@ the same shape as a `backendExtended` block:
 
 ```json
 {
-  "ubuntu": { "nodes": { "node1": { "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true,
-    "background": "ubuntu/background.sh", "foreground": "ubuntu/startup.sh" } } },
-  "alpine": { "nodes": { "node1": { "imageid": "alpine", "ip": "172.30.1.2", "cmd": "sh" } } }
+  "ubuntu": { "nodes": [
+    { "name": "node1", "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04", "ip": "172.30.1.2", "cmd": "bash", "docker": true,
+      "background": "ubuntu/background.sh", "foreground": "ubuntu/startup.sh" }
+  ] },
+  "alpine": { "nodes": [ { "name": "node1", "imageid": "alpine", "ip": "172.30.1.2", "cmd": "sh" } ] }
 }
 ```
+
+`nodes` is an **ordered list** (the order sets the implicit `host1`/`host2` …
+positional aliases). A multi-node profile such as `kubernetes-kubeadm-2nodes`
+just lists more entries.
 
 A profile node may also carry `background`/`foreground` **script files** that run
 automatically when the env starts (see the per-node fields table above). The

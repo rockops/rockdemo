@@ -1,0 +1,33 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: 1.33.1 #<-- Use the word stable for newest version
+controlPlaneEndpoint: "k8scp:6443" #<-- Use the alias we put in /etc/hosts not the IP
+networking:
+  # 10.244.0.0/16, not 192.168.0.0/16: the latter overlaps a typical home LAN
+  # and breaks host access to published ports (Cilium routes host replies into
+  # cilium_host). MUST match cluster-pool-ipv4-cidr in the Cilium manifest.
+  podSubnet: 10.244.0.0/16
+---
+# kube-proxy runs in this node's own network namespace, which can't write the
+# global net/netfilter/nf_conntrack_max sysctl (permission denied, even when
+# privileged). maxPerCore/min: 0 tell kube-proxy not to touch it — the standard
+# setting for kubeadm inside a container (same as kind/k3d use).
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+conntrack:
+  maxPerCore: 0
+  min: 0
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+# A fixed, non-expiring bootstrap token so the worker (worker.sh) can join with
+# the same value. Declared here because `kubeadm init --config` rejects the
+# --token/--token-ttl CLI flags.
+bootstrapTokens:
+  - token: "abcdef.0123456789abcdef"
+    ttl: "0s" # never expires (demo cluster)
+    usages:
+      - signing
+      - authentication
+    groups:
+      - system:bootstrappers:kubeadm:default-node-token

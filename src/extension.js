@@ -252,15 +252,21 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // inner overlay sits on a real filesystem — stacking overlay-on-overlay
   // otherwise fails with "mount overlay ... invalid argument" and no pod
   // sandbox can ever start. The volumes are anonymous (auto-removed by --rm) but
-  // labelled, so any orphans can be swept by label. `--cgroupns=host` lets
-  // podman/conmon create cgroups in the full host hierarchy (avoids the
-  // cgroup-v2 "no internal processes" warning). `/lib/modules` is bind-mounted
-  // read-only so `modprobe` inside the container finds the host kernel's
-  // modules (br_netfilter, overlay, ...) — the modules are global to the shared
-  // kernel, this just hands the container the matching .ko files + dep metadata
-  // so the raw CNCF kubeadm procedure runs unmodified.
+  // labelled, so any orphans can be swept by label. `--cgroupns=private` gives
+  // each node its OWN cgroup namespace, so its kubelet's systemd-driver
+  // `kubepods.slice` is scoped under the container instead of at the shared host
+  // cgroup root. This is REQUIRED for multi-node kubeadm: with `=host`, every
+  // node's kubelet manages the same top-level /sys/fs/cgroup/kubepods.slice, so
+  // when a second node joins its kubelet's cgroup reconciliation wipes the first
+  // node's pod cgroups (runc then fails with "cgroup.controllers: no such file
+  // or directory") and the control plane's pods are torn down and can't restart.
+  // Private per-node cgroups is exactly how kind/k3d isolate their nodes.
+  // `/lib/modules` is bind-mounted read-only so `modprobe` inside the container
+  // finds the host kernel's modules (br_netfilter, overlay, ...) — the modules
+  // are global to the shared kernel, this just hands the container the matching
+  // .ko files + dep metadata so the raw CNCF kubeadm procedure runs unmodified.
   const priv = privileged
-    ? `--privileged --cgroupns=host ` +
+    ? `--privileged --cgroupns=private ` +
       `--mount type=volume,dst=/var/lib/docker,volume-label=${ROCKDEMO_LABEL} ` +
       `--mount type=volume,dst=/var/lib/containers,volume-label=${ROCKDEMO_LABEL} ` +
       `--mount type=volume,dst=/var/lib/containerd,volume-label=${ROCKDEMO_LABEL} ` +
@@ -287,7 +293,11 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   term.sendText(
     (
       netEnsure +
-      `docker rm -f ${containerName} >/dev/null 2>&1; ` +
+      // `-v` also drops the container's anonymous nested-runtime volumes
+      // (/var/lib/{docker,containers,containerd}); without it they orphan and
+      // accumulate across recreates, and a leftover container's containerd/etcd
+      // state could otherwise linger into the next Start.
+      `docker rm -f -v ${containerName} >/dev/null 2>&1; ` +
       launch
     ).replace(/\s+/g, " "),
     true
@@ -301,7 +311,7 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
 
 // Default backend profiles bundled with the extension (config/backends.json):
 // a map of Killercoda-style `backend.imageid` keys -> a backendExtended-shaped
-// { nodes: { name: { imageid } } }. Loaded once and cached.
+// { nodes: [ { name, imageid, ... } ] } (ordered list). Loaded once and cached.
 let backendsCache = null;
 function loadBackends() {
   if (backendsCache) return backendsCache;
@@ -314,18 +324,27 @@ function loadBackends() {
   return backendsCache;
 }
 
-/** Turn a `{ name: { imageid, cmd, ip, docker } }` nodes map into a node list. */
-function nodesFromMap(nodes) {
-  return Object.keys(nodes).map((name) => ({
-    name,
-    alias: nodes[name].alias || null,
-    imageid: nodes[name].imageid,
-    cmd: nodes[name].cmd,
-    ip: nodes[name].ip,
-    docker: !!nodes[name].docker,
-    systemd: !!nodes[name].systemd,
-    background: nodes[name].background || null,
-    foreground: nodes[name].foreground || null,
+/**
+ * Normalize a backend's `nodes` into an ordered node list. The canonical form is
+ * an **ordered list** of `{ name, ... }` — order matters because it defines the
+ * implicit positional aliases `host1`/`host01`, `host2`/`host02`, … A legacy
+ * `{ name: {...} }` **map** is still accepted (its key becomes `name`), but a map
+ * has no guaranteed order, so the list form is preferred.
+ */
+function nodesFromConfig(nodes) {
+  const list = Array.isArray(nodes)
+    ? nodes
+    : Object.keys(nodes || {}).map((name) => ({ name, ...nodes[name] }));
+  return list.map((n) => ({
+    name: n.name,
+    alias: n.alias || null,
+    imageid: n.imageid,
+    cmd: n.cmd,
+    ip: n.ip,
+    docker: !!n.docker,
+    systemd: !!n.systemd,
+    background: n.background || null,
+    foreground: n.foreground || null,
   }));
 }
 
@@ -340,13 +359,13 @@ function nodesFromMap(nodes) {
  */
 function resolveNodes(scenario) {
   const ext = scenario.backendExtended;
-  if (ext && ext.nodes) return nodesFromMap(ext.nodes);
+  if (ext && ext.nodes) return nodesFromConfig(ext.nodes);
 
   const key = scenario.backend && scenario.backend.imageid;
   if (key) {
     const backends = loadBackends();
     const profile = backends[key];
-    if (profile && profile.nodes) return nodesFromMap(profile.nodes);
+    if (profile && profile.nodes) return nodesFromConfig(profile.nodes);
     vscode.window.showWarningMessage(
       `rockDemo: unknown backend "${key}" — not a default profile ` +
         `(${Object.keys(backends).join(", ") || "none"}). ` +
@@ -497,8 +516,19 @@ function disposeEntryTerminals(entry) {
     for (const rec of entry.terminals) {
       rec.terminal.dispose();
       if (rec.containerName) {
-        execFile("docker", ["rm", "-f", "-v", rec.containerName]).catch(() => {
-          /* already gone — ignore */
+        // Force-remove the container. A "No such container" error means it was
+        // already gone (fine) — but ANY other failure (docker not on the
+        // extension-host PATH, daemon unreachable, permission denied) would
+        // otherwise be swallowed and leave the container running after Stop, so
+        // surface those loudly instead of hiding them.
+        execFile("docker", ["rm", "-f", "-v", rec.containerName]).catch((err) => {
+          const msg = String((err && err.stderr) || (err && err.message) || err);
+          if (/No such container/i.test(msg)) return; // already gone — expected
+          console.error(`rockDemo: failed to remove ${rec.containerName}:`, msg);
+          vscode.window.showErrorMessage(
+            `rockDemo: could not remove container ${rec.containerName} — ` +
+              `it may still be running. ${msg}`
+          );
         });
       }
     }
