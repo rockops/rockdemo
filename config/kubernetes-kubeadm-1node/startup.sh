@@ -7,10 +7,13 @@
 #   2. install the Cilium CNI    (once the API server answers)
 #   3. wait for the node Ready   (turns Ready only after the CNI is up)
 #
-# Assets (kubeadm-config.yaml, cilium-cni.yaml) live alongside this script and
-# are mounted read-only at this path inside the container.
+# kubeadm-config.yaml lives alongside this script and is mounted read-only at
+# $CFG inside the container. The add-on manifests (Cilium, local-path) are baked
+# into the image at $MANIFESTS — same files the preload step derives from, so the
+# applied versions and the warm image cache can never drift.
 set -e
 CFG=/var/rockdemo/config/kubernetes-kubeadm-1node
+MANIFESTS=/opt/rockdemo/manifests
 
 # Map "cp" (the --node-name) and "k8scp" (the controlPlaneEndpoint in
 # kubeadm-config.yaml) to this node's MAIN interface IP — the source address of
@@ -27,8 +30,23 @@ done
 echo 'Waiting for containerd...'
 until crictl info >/dev/null 2>&1; do sleep 1; done
 
+# Import the images baked into the image into containerd (visible in this
+# terminal, one per line) so kubeadm/kubelet start from the warm cache instead of
+# pulling from the network.
+echo 'Importing preloaded container images...'
+rockdemo-preload-images.sh
+
 echo 'Initialising the control plane with kubeadm (this takes a couple of minutes)...'
-kubeadm init --config="$CFG/kubeadm-config.yaml" --upload-certs --node-name=cp \
+# Pin the version to the installed kubeadm binary (the single k8s version knob —
+# set by KUBE_PKG_VERSION in the image). kubeadm rejects --kubernetes-version
+# alongside --config, so inject it into the config's placeholder line instead
+# (the mount is read-only, so render a copy in /tmp). Pinning avoids kubeadm
+# fetching the latest patch from the internet — which would skew from the
+# installed kubelet and miss the preloaded control-plane images.
+RENDERED_CONFIG=/tmp/kubeadm-config.yaml
+sed "s|^kubernetesVersion:.*|kubernetesVersion: $(kubeadm version -o short)|" \
+  "$CFG/kubeadm-config.yaml" > "$RENDERED_CONFIG"
+kubeadm init --config="$RENDERED_CONFIG" --upload-certs --node-name=cp \
   | tee /var/log/kubeadm-init.out
 
 # kubeconfig for root (matches $KUBECONFIG baked into the image).
@@ -39,7 +57,7 @@ cp -f /etc/kubernetes/admin.conf /root/.kube/config
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 
 echo 'Installing the Cilium CNI...'
-kubectl apply -f "$CFG/cilium-cni.yaml"
+kubectl apply -f "$MANIFESTS/cilium-cni.yaml"
 
 echo 'Waiting for the node to become Ready (Cilium must be up first)...'
 kubectl wait --for=condition=Ready node --all --timeout=300s
@@ -48,11 +66,11 @@ echo 'Waiting for the Cilium components to be ready...'
 kubectl -n kube-system rollout status daemonset/cilium --timeout=300s
 kubectl -n kube-system rollout status deployment/cilium-operator --timeout=300s
 
-# Storage: install the Rancher local-path provisioner (bundled, version-pinned
-# alongside this script) and make it the default StorageClass, so PVCs bind out
-# of the box on this single node.
+# Storage: install the Rancher local-path provisioner (baked into the image,
+# version pinned in the manifest) and make it the default StorageClass, so PVCs
+# bind out of the box on this single node.
 echo 'Installing the local-path storage provisioner...'
-kubectl apply -f "$CFG/local-path-storage.yaml"
+kubectl apply -f "$MANIFESTS/local-path-storage.yaml"
 kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
 kubectl patch storageclass local-path \
   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'

@@ -2,11 +2,9 @@
 # Backend foreground for the control-plane node of the 2-node kubeadm cluster.
 # Same as the 1-node startup, but `kubeadm init` publishes a fixed bootstrap
 # token so the worker (worker.sh) can join, and it waits for BOTH nodes Ready.
-# Reuses the 1-node assets (kubeadm-config / cilium / local-path) — the whole
-# config/ folder is mounted read-only, so they're available by path.
 set -e
 CFG=/var/rockdemo/config/kubernetes-kubeadm-2nodes       # 2-node kubeadm config
-ASSETS=/var/rockdemo/config/kubernetes-kubeadm-1node     # reuse cilium + local-path manifests
+MANIFESTS=/opt/rockdemo/manifests                        # add-on manifests baked into the image
 # The bootstrap token the worker joins with lives in $CFG/kubeadm-config.yaml
 # (bootstrapTokens) — `kubeadm init --config` forbids the --token CLI flags.
 
@@ -21,8 +19,23 @@ done
 echo 'Waiting for containerd...'
 until crictl info >/dev/null 2>&1; do sleep 1; done
 
+# Import the images baked into the image into containerd (visible in this
+# terminal, one per line) so kubeadm starts from the warm cache instead of
+# pulling from the network.
+echo 'Importing preloaded container images...'
+rockdemo-preload-images.sh
+
 echo 'Initialising the control plane with kubeadm (this takes a couple of minutes)...'
-kubeadm init --config="$CFG/kubeadm-config.yaml" --upload-certs --node-name=cp \
+# Pin the version to the installed kubeadm binary (the single k8s version knob —
+# set by KUBE_PKG_VERSION in the image). kubeadm rejects --kubernetes-version
+# alongside --config, so inject it into the config's placeholder line instead
+# (the mount is read-only, so render a copy in /tmp). Pinning avoids kubeadm
+# fetching the latest patch from the internet — which would skew from the
+# installed kubelet and miss the preloaded control-plane images.
+RENDERED_CONFIG=/tmp/kubeadm-config.yaml
+sed "s|^kubernetesVersion:.*|kubernetesVersion: $(kubeadm version -o short)|" \
+  "$CFG/kubeadm-config.yaml" > "$RENDERED_CONFIG"
+kubeadm init --config="$RENDERED_CONFIG" --upload-certs --node-name=cp \
   | tee /var/log/kubeadm-init.out
 
 # kubeconfig for root (matches $KUBECONFIG baked into the image).
@@ -30,7 +43,7 @@ mkdir -p /root/.kube
 cp -f /etc/kubernetes/admin.conf /root/.kube/config
 
 echo 'Installing the Cilium CNI...'
-kubectl apply -f "$ASSETS/cilium-cni.yaml"
+kubectl apply -f "$MANIFESTS/cilium-cni.yaml"
 
 echo 'Waiting for the worker to join...'
 i=0
@@ -47,7 +60,7 @@ kubectl -n kube-system rollout status daemonset/cilium --timeout=300s
 kubectl -n kube-system rollout status deployment/cilium-operator --timeout=300s
 
 echo 'Installing the local-path storage provisioner...'
-kubectl apply -f "$ASSETS/local-path-storage.yaml"
+kubectl apply -f "$MANIFESTS/local-path-storage.yaml"
 kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
 kubectl patch storageclass local-path \
   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'

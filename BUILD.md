@@ -39,6 +39,16 @@ Manage* scope, *All accessible organizations*).
 
 ---
 
+## Kubernetes backend image versions (Kubernetes / Cilium / storage)
+
+The `kubernetes-kubeadm-1node` image (used by both the 1-node and 2-node kubeadm
+backends) pre-pulls every runtime container image so clusters start from a warm
+cache. Each component's version has **one source of truth** and the pre-pull list
+is derived from it. To change the Kubernetes, Cilium, storage, crictl or CNI
+versions, see **[docker/kubernetes-kubeadm-1node/VERSIONS.md](docker/kubernetes-kubeadm-1node/VERSIONS.md)**.
+
+---
+
 ## Versioning: dev (pre-release) vs. stable
 
 The VS Code Marketplace **only accepts `major.minor.patch`** — there is **no**

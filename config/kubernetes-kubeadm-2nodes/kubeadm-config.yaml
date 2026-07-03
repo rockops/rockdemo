@@ -1,6 +1,12 @@
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-kubernetesVersion: 1.33.1 #<-- Use the word stable for newest version
+# PLACEHOLDER — the foreground script (controlplane.sh) rewrites this line at
+# runtime to the installed kubeadm binary's version (`kubeadm version -o short`),
+# so the Kubernetes version has ONE source of truth: KUBE_PKG_VERSION in the image
+# Dockerfile. kubeadm needs the field present (with --config it won't take a
+# --kubernetes-version flag, and omitting it makes kubeadm fetch the latest patch
+# from the internet — which would skew from the installed binary + preload cache).
+kubernetesVersion: 0.0.0
 controlPlaneEndpoint: "k8scp:6443" #<-- Use the alias we put in /etc/hosts not the IP
 networking:
   # 10.244.0.0/16, not 192.168.0.0/16: the latter overlaps a typical home LAN
