@@ -2,7 +2,7 @@
   "name": "rockdemo",
   "displayName": "rockDemo",
   "description": "Run Killercoda-style markdown scenarios as live demos in VS Code.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "RockOps",
   "license": "Apache-2.0",
   "icon": "images/icon.png",
