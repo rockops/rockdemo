@@ -1424,6 +1424,37 @@ function escapeHtml(s) {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * Resolve an image `src` for the sandboxed webview. Absolute URLs (http/https/
+ * data) and already-webview URIs pass through untouched; a relative/local path
+ * is resolved against the rendering base directory (a serialized URI) and
+ * converted to a `webview.asWebviewUri` URL so the webview can actually load the
+ * file (subject to the img-src CSP + the panel's localResourceRoots). Without
+ * this, a `<img src="./foo.png">` points at a path the webview can't reach and
+ * renders broken.
+ */
+function resolveImgSrc(src, baseStr, webview) {
+  const s = String(src || "").trim();
+  if (!s) return s;
+  if (/^(https?:|data:|vscode-webview-resource:|vscode-resource:)/i.test(s)) return s;
+  if (!baseStr || !webview) return s;
+  try {
+    // joinPath normalizes ".."/"." segments, so ../assets/logo.png resolves.
+    const target = vscode.Uri.joinPath(vscode.Uri.parse(baseStr), s);
+    return webview.asWebviewUri(target).toString();
+  } catch (err) {
+    return s;
+  }
+}
+
+/** Rewrite an <img> tag's src attribute to a webview-safe URL (leaves the rest). */
+function rewriteImgTag(tag, baseStr, webview) {
+  return tag.replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*)(["'])(.*?)\2/i,
+    (_m, pre, q, src) => `${pre}${q}${resolveImgSrc(src, baseStr, webview)}${q}`
+  );
+}
+
 // HTML tags allowed to pass through verbatim (Killercoda-compatible raw-HTML
 // support). The webview CSP already blocks script execution and external loads,
 // so this is purely about not escaping author-written markup. script/style/
@@ -1486,8 +1517,12 @@ function inlineCodeHtml(code, anno) {
   return codeHtml;
 }
 
-/** Render a single line of inline markdown (code, bold, italic, links, HTML). */
-function renderInline(text) {
+/**
+ * Render a single line of inline markdown (code, bold, italic, links, images,
+ * HTML). `baseStr`/`webview` (both optional) let relative image `src` paths be
+ * resolved to webview-safe URLs — see resolveImgSrc.
+ */
+function renderInline(text, baseStr, webview) {
   // Stash spans that must survive escaping/markdown rules untouched, swapping in
   // a placeholder containing no markdown/HTML metacharacters.
   const tokens = [];
@@ -1503,8 +1538,20 @@ function renderInline(text) {
     (_m, c, anno) => stash(inlineCodeHtml(c, anno))
   );
 
+  // Markdown images: ![alt](src) → <img>. Stashed so the tag survives escaping,
+  // and matched BEFORE links so the trailing [alt](src) isn't taken as a link.
+  s = s.replace(
+    /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    (_m, alt, src) =>
+      stash(`<img src="${resolveImgSrc(src, baseStr, webview)}" alt="${escapeHtml(alt)}" />`)
+  );
+
   // Allow-listed raw HTML tags pass through verbatim (e.g. <br>, <kbd>, <img>).
-  s = s.replace(HTML_TAG_RE, (m, name) => (isPassthroughTag(name) ? stash(m) : m));
+  // An <img> has its relative src rewritten to a webview-safe URL first.
+  s = s.replace(HTML_TAG_RE, (m, name) => {
+    if (!isPassthroughTag(name)) return m;
+    return stash(name.toLowerCase() === "img" ? rewriteImgTag(m, baseStr, webview) : m);
+  });
 
   // Escape everything that remains (stray <, >, &, quotes in prose).
   s = escapeHtml(s);
@@ -1621,9 +1668,12 @@ function codeBlockHtml(content, lang, highlight) {
  * replaced by their buttons. Re-uses the exact same parsing rules as
  * parseScenario / the CodeLens provider so the two modes never disagree.
  */
-function renderMarkdownToHtml(text, baseStr) {
+function renderMarkdownToHtml(text, baseStr, webview) {
   const lines = text.split(/\r?\n/);
   const out = [];
+  // Inline renderer bound to this render's base dir + webview, so relative
+  // image srcs resolve to webview-safe URLs.
+  const ri = (t) => renderInline(t, baseStr, webview);
 
   let inFence = false;
   let lang = "";
@@ -1642,7 +1692,7 @@ function renderMarkdownToHtml(text, baseStr) {
   let paragraph = [];
   const flushParagraph = () => {
     if (paragraph.length) {
-      out.push(`<p>${renderInline(paragraph.join(" "))}</p>`);
+      out.push(`<p>${ri(paragraph.join(" "))}</p>`);
       paragraph = [];
     }
   };
@@ -1651,7 +1701,7 @@ function renderMarkdownToHtml(text, baseStr) {
   let quote = [];
   const flushQuote = () => {
     if (quote.length) {
-      out.push(`<blockquote>${renderInline(quote.join(" "))}</blockquote>`);
+      out.push(`<blockquote>${ri(quote.join(" "))}</blockquote>`);
       quote = [];
     }
   };
@@ -1713,7 +1763,7 @@ function renderMarkdownToHtml(text, baseStr) {
       flushQuote();
       closeList();
       const level = heading[1].length;
-      out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+      out.push(`<h${level}>${ri(heading[2])}</h${level}>`);
       continue;
     }
 
@@ -1743,7 +1793,7 @@ function renderMarkdownToHtml(text, baseStr) {
         out.push("<ul>");
         inList = true;
       }
-      out.push(`<li>${renderInline(li[1])}</li>`);
+      out.push(`<li>${ri(li[1])}</li>`);
       continue;
     }
 
@@ -1752,7 +1802,7 @@ function renderMarkdownToHtml(text, baseStr) {
       flushParagraph();
       flushQuote();
       closeList();
-      out.push(`<ul><li>${renderInline(oli[1])}</li></ul>`);
+      out.push(`<ul><li>${ri(oli[1])}</li></ul>`);
       continue;
     }
 
@@ -1763,7 +1813,10 @@ function renderMarkdownToHtml(text, baseStr) {
       flushParagraph();
       flushQuote();
       closeList();
-      out.push(line.trim());
+      const raw = line.trim();
+      // A standalone <img> line bypasses renderInline, so rewrite its relative
+      // src to a webview-safe URL here too.
+      out.push(/^<img\b/i.test(raw) ? rewriteImgTag(raw, baseStr, webview) : raw);
       continue;
     }
 
@@ -1899,6 +1952,28 @@ function mediaRoots() {
   return extensionUri ? [vscode.Uri.joinPath(extensionUri, "media")] : [];
 }
 
+/**
+ * localResourceRoots for a demo/scenario panel: the vendored media/ folder, the
+ * open workspace folders, and the source document's folder plus a few ancestors.
+ * The webview may only load local files that live under one of these roots, so a
+ * scenario's images — referenced relatively (`./img.png`, `../assets/img.png`,
+ * even `../../assets/img.png` from a nested step) — need their containing dirs
+ * whitelisted here, or they render broken. Ancestors cover files opened outside
+ * any workspace folder.
+ */
+function resourceRoots(docUri) {
+  const roots = mediaRoots();
+  for (const f of vscode.workspace.workspaceFolders || []) roots.push(f.uri);
+  if (docUri) {
+    let dir = vscode.Uri.joinPath(docUri, "..");
+    for (let i = 0; i < 4; i++) {
+      roots.push(dir);
+      dir = vscode.Uri.joinPath(dir, "..");
+    }
+  }
+  return roots;
+}
+
 /** Webview URI for a vendored asset under media/, or "" if unavailable. */
 function mediaUri(webview, file) {
   if (!extensionUri) return "";
@@ -1921,7 +1996,7 @@ function pageHtml(webview, title, body) {
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}'; font-src ${webview.cspSource};" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}'; font-src ${webview.cspSource};" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>${escapeHtml(title)}</title>
 ${hljsHead}
@@ -2097,7 +2172,7 @@ function demoHtml(document, webview) {
   const baseStr = vscode.Uri.joinPath(document.uri, "..").toString();
   const body =
     `<section class="step active" data-step="0">` +
-    renderMarkdownToHtml(document.getText(), baseStr) +
+    renderMarkdownToHtml(document.getText(), baseStr, webview) +
     `</section>`;
   const title = document.uri.path.split("/").pop() || "rockDemo";
   return pageHtml(webview, "rockDemo — " + title, body);
@@ -2180,7 +2255,7 @@ function openDemoPanel(document, panels) {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: mediaRoots(),
+        localResourceRoots: resourceRoots(document.uri),
       }
     );
     entry = { panel, terminals: [] };
@@ -2303,7 +2378,7 @@ function scenarioHtml(data, webview) {
       `<h1>${escapeHtml(scenario.title || "Scenario")}</h1>` +
       `<p class="lead">${escapeHtml(scenario.description || "")}</p>` +
       // Optional intro markdown, rendered with the demo player (buttons work).
-      (intro ? renderMarkdownToHtml(intro.md, intro.baseStr) : "") +
+      (intro ? renderMarkdownToHtml(intro.md, intro.baseStr, webview) : "") +
       introNav +
       `</section>`
   );
@@ -2331,7 +2406,7 @@ function scenarioHtml(data, webview) {
       `<section class="step" data-step="${i}">` +
         `<p class="crumb">Step ${i + 1} / ${steps.length}</p>` +
         `<h2>${escapeHtml(s.title || "Step " + (i + 1))}</h2>` +
-        renderMarkdownToHtml(s.md, s.baseStr) +
+        renderMarkdownToHtml(s.md, s.baseStr, webview) +
         `<div class="nav">${prev}${verify}${next}</div>` +
         `</section>`
     );
@@ -2343,7 +2418,7 @@ function scenarioHtml(data, webview) {
   // otherwise a built-in completion message.
   if (!noSteps) {
     const finishBody = finish
-      ? renderMarkdownToHtml(finish, data.dirStr)
+      ? renderMarkdownToHtml(finish, data.dirStr, webview)
       : `<h1>🎉 ${escapeHtml(scenario.title || "Scenario")} complete</h1>` +
         `<p class="lead">You've reached the end of this scenario.</p>`;
     sections.push(
@@ -2394,7 +2469,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: mediaRoots(),
+        localResourceRoots: resourceRoots(jsonDoc.uri),
       }
     );
     const nodes = resolveNodes(scenario);
