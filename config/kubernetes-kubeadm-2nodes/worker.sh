@@ -13,6 +13,12 @@ grep -q ' k8scp$' /etc/hosts || echo "$CP_IP k8scp" >> /etc/hosts
 echo 'Waiting for containerd...'
 until crictl info >/dev/null 2>&1; do sleep 1; done
 
+# Import the images baked into the image into containerd (visible in this
+# terminal, one per line) so the join's kube-proxy/pause/Cilium images come from
+# the warm cache instead of the network.
+echo 'Importing preloaded container images...'
+rockdemo-preload-images.sh
+
 echo 'Waiting for the control-plane API (k8scp:6443)...'
 until curl -sk https://k8scp:6443/healthz >/dev/null 2>&1; do sleep 3; done
 
@@ -21,7 +27,6 @@ kubeadm join k8scp:6443 \
   --token "$TOKEN" \
   --discovery-token-unsafe-skip-ca-verification \
   --node-name node01 \
-  --ignore-preflight-errors=SystemVerification \
   | tee /var/log/kubeadm-join.out
 
 echo 'Worker joined.'

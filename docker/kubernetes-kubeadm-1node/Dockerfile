@@ -20,21 +20,29 @@ FROM ghcr.io/rockops/rockdemo/ubuntu-systemd:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Pins. pkgs.k8s.io is per-minor; the kube* packages are pinned to a patch that
-# matches the kubernetesVersion in the bundled kubeadm-config.yaml asset.
-ARG K8S_MINOR=v1.33
-ARG KUBE_PKG_VERSION=1.33.1-1.1
+# Build-time tool downloads (not pre-pulled container images — see VERSIONS.md).
 ARG CRICTL_VERSION=v1.33.0
 ARG CNI_PLUGINS_VERSION=v1.5.1
 ARG TARGETARCH=amd64
+
+# Single source of truth for the Kubernetes + Cilium versions. Edit versions.env,
+# rebuild, done — the apt pins, apt repo minor, control-plane image tags, Cilium
+# manifest tags and the pre-pulled cache all follow from it. COPYed first so a
+# version bump invalidates the cache from here down. See versions.env / VERSIONS.md.
+COPY versions.env /etc/rockdemo-versions.env
 
 # --- Kubernetes apt repo + kubelet/kubeadm/kubectl + containerd + helpers ---
 # This mirrors the apt steps in scenarios/install-kubernetes/step1/step1.md, so
 # by the time a shell appears the only thing left to run is `kubeadm init`.
 # conntrack/socat/ethtool/iptables are kubeadm runtime/preflight dependencies;
 # containerd is the CRI runtime (the base image's docker.io already pulls it in,
-# installed explicitly here to be self-contained).
-RUN install -m 0755 -d /etc/apt/keyrings \
+# installed explicitly here to be self-contained). The apt repo minor (K8S_MINOR)
+# and package pin (KUBE_PKG_VERSION) are DERIVED from KUBERNETES_VERSION, so that
+# version lives in exactly one place.
+RUN . /etc/rockdemo-versions.env \
+ && K8S_MINOR="v$(echo "$KUBERNETES_VERSION" | cut -d. -f1,2)" \
+ && KUBE_PKG_VERSION="${KUBERNETES_VERSION}-1.1" \
+ && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/deb/Release.key" \
       | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg \
  && echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/deb/ /" \
@@ -89,6 +97,64 @@ RUN systemctl mask docker.service docker.socket 2>/dev/null || true \
 RUN printf 'overlay\nbr_netfilter\n' > /etc/modules-load.d/k8s.conf \
  && printf 'net.bridge.bridge-nf-call-ip6tables = 1\nnet.bridge.bridge-nf-call-iptables = 1\nnet.ipv4.ip_forward = 1\n' \
       > /etc/sysctl.d/k8s.conf
+
+# --- cluster add-on manifests (applied at cluster start by the foreground scripts) ---
+# Cilium (CNI) and Rancher local-path (storage). The preload step below derives
+# the images to pre-pull by grepping these files, so the cache can never drift
+# from what actually runs. The Cilium cilium/operator tags are TEMPLATED
+# (__CILIUM_VERSION__) and stamped here from versions.env, so the Cilium version
+# lives in one place; the storage/busybox tags live in the local-path manifest.
+COPY manifests/ /opt/rockdemo/manifests/
+RUN . /etc/rockdemo-versions.env \
+ && sed -i "s|__CILIUM_VERSION__|v${CILIUM_VERSION}|g" /opt/rockdemo/manifests/cilium-cni.yaml \
+ && ! grep -q '__CILIUM_VERSION__' /opt/rockdemo/manifests/cilium-cni.yaml
+
+# --- pre-pull every runtime container image as a tarball (startup speedup) ---
+# The single biggest cost of bringing up the cluster at runtime is pulling the
+# control-plane images (~700 MB) and Cilium (~600 MB) over the network on every
+# start. We can't pre-pull them into /var/lib/containerd because rockDemo mounts
+# a fresh anonymous volume there at runtime (nested overlay can't stack — see
+# startNamedContainer), which would shadow them. Instead we download each image
+# here as a docker-archive TARBALL into /opt/rockdemo/preload (a normal image
+# path, not shadowed); the backend foreground scripts import them into the
+# volume-backed containerd at cluster start (rockdemo-preload-images.sh), printing
+# each image so the user watches it happen. skopeo pulls straight from the
+# registry into a tar with no daemon and no privileges — so this works in a plain
+# `docker build`, unlike `kubeadm config images pull` which needs containerd.
+#
+# The ref list is DERIVED, never restated, so it can't drift from what runs:
+#   - control-plane images: `kubeadm config images list` pinned to the INSTALLED
+#     kubeadm's version (`kubeadm version -o short`, itself set by KUBE_PKG_VERSION
+#     above — the single Kubernetes version knob). Pinning matters: with no
+#     version kubeadm resolves the latest patch from the internet, which would
+#     drift from the installed kubelet/kubeadm.
+#   - add-on images: every `image:` line in the manifests COPYed above.
+# Refs are tag-only, exactly matching what kubelet requests, so at runtime
+# containerd finds them present (IfNotPresent) and never re-pulls.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends skopeo \
+ && mkdir -p /opt/rockdemo/preload \
+ && REFS="$(kubeadm config images list --kubernetes-version="$(kubeadm version -o short)") \
+      $(grep -rhE '^[[:space:]]*image:' /opt/rockdemo/manifests/ \
+        | sed -E 's/.*image:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/' | sort -u)" \
+ && : > /opt/rockdemo/preload/images.list \
+ && for ref in $REFS; do \
+      name="$(echo "$ref" | sed 's|[/:@]|_|g')"; \
+      echo "pre-pulling $ref"; \
+      skopeo copy --retry-times 5 --quiet \
+        "docker://$ref" "docker-archive:/opt/rockdemo/preload/${name}.tar:$ref"; \
+      echo "$ref" >> /opt/rockdemo/preload/images.list; \
+    done \
+ && apt-get purge -y skopeo \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+# Importer for the baked-in image tarballs. The backend foreground scripts call
+# this at cluster start (before `kubeadm init`/`join`), so the import runs in the
+# node's terminal — the user sees each image imported — and the cluster starts
+# from a warm cache. Reads /opt/rockdemo/preload/images.list (written above).
+COPY rockdemo-preload-images.sh /usr/local/bin/rockdemo-preload-images.sh
+RUN chmod +x /usr/local/bin/rockdemo-preload-images.sh
 
 WORKDIR /root
 # So kubectl in the interactive shell finds the cluster immediately once
