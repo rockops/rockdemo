@@ -265,14 +265,20 @@ function ensureNetworkCmd() {
  * boots `/sbin/init` as PID 1 (detached) and the interactive shell is attached
  * via `docker exec` — so `systemctl` works inside, matching a real host. When
  * `systemd` is unset the shell itself is PID 1 (lighter: no init, instant
- * start), which is the default for simple scenarios. Returns a record:
- * { name, terminal, containerName }.
+ * start), which is the default for simple scenarios. `location` (optional) is a
+ * VS Code terminal `location` — pass `{ parentTerminal }` to split this node's
+ * terminal beside another's instead of opening a new tab (see startNodes).
+ * Returns a record: { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
-  const term = vscode.window.createTerminal(name);
+  // `location: { parentTerminal }` splits this terminal into the parent's panel
+  // group (side-by-side); no location = a new stacked tab (the default).
+  const term = vscode.window.createTerminal(
+    location ? { name, location } : name
+  );
   term.show();
   const vol = (mounts || [])
     .map((m) => `-v "${m.host}:${m.container}${m.ro ? ":ro" : ""}"`)
@@ -386,11 +392,11 @@ function loadBackends() {
  * `{ name: {...} }` **map** is still accepted (its key becomes `name`), but a map
  * has no guaranteed order, so the list form is preferred.
  */
-function nodesFromConfig(nodes) {
+function nodesFromConfig(nodes, layout) {
   const list = Array.isArray(nodes)
     ? nodes
     : Object.keys(nodes || {}).map((name) => ({ name, ...nodes[name] }));
-  return list.map((n) => ({
+  return list.map((n, i) => ({
     name: n.name,
     alias: n.alias || null,
     imageid: n.imageid,
@@ -400,6 +406,12 @@ function nodesFromConfig(nodes) {
     systemd: !!n.systemd,
     background: n.background || null,
     foreground: n.foreground || null,
+    // Terminal layout: "split" opens this node's terminal side-by-side with the
+    // previous node's (in the same panel group) instead of as its own stacked
+    // tab (the default). The `layout: "split"` shorthand sets it on every node
+    // after the first; otherwise honour the per-node `split` flag. The first
+    // node can never split — there's nothing before it to split beside.
+    split: i > 0 && (layout === "split" || !!n.split),
   }));
 }
 
@@ -414,13 +426,13 @@ function nodesFromConfig(nodes) {
  */
 function resolveNodes(scenario) {
   const ext = scenario.backendExtended;
-  if (ext && ext.nodes) return nodesFromConfig(ext.nodes);
+  if (ext && ext.nodes) return nodesFromConfig(ext.nodes, ext.layout);
 
   const key = scenario.backend && scenario.backend.imageid;
   if (key) {
     const backends = loadBackends();
     const profile = backends[key];
-    if (profile && profile.nodes) return nodesFromConfig(profile.nodes);
+    if (profile && profile.nodes) return nodesFromConfig(profile.nodes, profile.layout);
     vscode.window.showWarningMessage(
       `rockDemo: unknown backend "${key}" — not a default profile ` +
         `(${Object.keys(backends).join(", ") || "none"}). ` +
@@ -463,6 +475,10 @@ function startNodes(entry) {
   // If any node declares a static IP, every node joins the shared rockdemo
   // network so they can communicate (those with an `ip` get pinned addresses).
   const useNet = entry.nodes.some((n) => n.ip);
+  // Terminal grouping: a node with `split` opens beside the current group's
+  // anchor terminal (side-by-side); a node without one starts a fresh group and
+  // becomes the new anchor. Tracked across the ordered launch below.
+  let groupAnchor = null;
   entry.terminals = entry.nodes
     .filter((n) => n.imageid)
     .map((n) => {
@@ -483,7 +499,15 @@ function startNodes(entry) {
       // non-executable source script still runs (without touching the source).
       mounts.push(...stageNodeScripts(entry, n));
       const ports = entry.trafficPorts.get(n.name) || [];
-      return startNamedContainer(n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports);
+      // Split beside the current anchor only if there is one; otherwise this
+      // node opens a new tab and becomes the anchor for any following splits.
+      const split = n.split && groupAnchor;
+      const location = split ? { parentTerminal: groupAnchor } : undefined;
+      const rec = startNamedContainer(
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location
+      );
+      if (!split) groupAnchor = rec.terminal;
+      return rec;
     });
   // VS Code makes the most-recently-created terminal the active one, and that
   // selection is applied asynchronously — so a synchronous show() of the first
@@ -628,6 +652,10 @@ let activeDemoPanel = null;
 // while set, the `rockdemo.scenarioRunning` context key is true, which hides
 // PLAY and shows STOP on every editor title bar regardless of focus.
 let runningScenarioPanel = null;
+
+// The running scenario's panel entry (nodes + terminals), so the "new terminal
+// on node" action can target its containers. Set/cleared with the panel below.
+let runningScenarioEntry = null;
 
 function setScenarioRunning(panel) {
   runningScenarioPanel = panel;
@@ -2777,6 +2805,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
     };
     scenarioPanels.set(key, entry);
     trackActivePanel(panel);
+    runningScenarioEntry = entry; // target for "new terminal on node"
     setScenarioRunning(panel); // hides PLAY / shows STOP everywhere
 
     panel.webview.onDidReceiveMessage(makeMessageHandler(entry));
@@ -2787,6 +2816,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       restoreDemoTerminalStyle(entry); // put back any DEMO-mode setting overrides
       disposeEntryTerminals(entry);
       scenarioPanels.delete(key);
+      if (runningScenarioEntry === entry) runningScenarioEntry = null;
       if (runningScenarioPanel === panel) setScenarioRunning(null);
     });
 
@@ -2901,6 +2931,97 @@ function notifyCacheCleared({ removed, inUse }) {
   vscode.window.showInformationMessage(m);
 }
 
+// ---------------------------------------------------------------------------
+// Ad-hoc node terminals: while a scenario runs, open EXTRA shells attached to a
+// node's already-running container via `docker exec`. Exposed both as a Command
+// Palette action and as a terminal-profile entry in the terminal view's `+`
+// dropdown. (VS Code terminal profiles are static package.json contributions —
+// there's no API to list one entry per live node — so a single entry picks the
+// node, auto-selecting when the scenario has just one.)
+// ---------------------------------------------------------------------------
+
+/**
+ * VS Code terminal options for a new shell on a node. We deliberately do NOT set
+ * `shellPath: "docker"`: that would make `docker exec` the terminal's own
+ * PROCESS, and when the scenario ends (container removed / terminal disposed) it
+ * exits non-zero, so VS Code pops its "process terminated with exit code" alert.
+ * Instead we keep the ordinary host shell as the process and run `docker exec`
+ * as a command inside it (see trackNodeTerminal) — exactly like a node's own
+ * terminal — so teardown is clean and no alert appears. The env marker lets
+ * onDidOpenTerminal recognise our terminals from BOTH entry points (the command
+ * and the `+` dropdown profile, whose provider gives us no terminal handle).
+ */
+function nodeTerminalOptions(node) {
+  return { name: node.name, env: { ROCKDEMO_NODE_TERMINAL: node.name } };
+}
+
+/**
+ * Pick a node of the running scenario to open a new terminal on: auto-selects
+ * the only node, prompts with a QuickPick when there's more than one. Returns
+ * null (after a warning) when no scenario is running.
+ */
+async function pickRunningNode() {
+  const entry = runningScenarioEntry;
+  const nodes = ((entry && !entry.disposed && entry.nodes) || []).filter(
+    (n) => n.imageid
+  );
+  if (!nodes.length) {
+    vscode.window.showWarningMessage(
+      "rockDemo: no running scenario node — start a scenario first."
+    );
+    return null;
+  }
+  if (nodes.length === 1) return nodes[0];
+  const pick = await vscode.window.showQuickPick(
+    nodes.map((n) => ({
+      label: n.name,
+      description: `docker exec … ${n.cmd || "sh"}`,
+      node: n,
+    })),
+    { placeHolder: "rockDemo: open a new terminal on which node?" }
+  );
+  return pick ? pick.node : null;
+}
+
+/**
+ * Register a just-opened node terminal on the running scenario entry so it's
+ * torn down with the scenario, then attach the shell. Only matches the terminals
+ * this feature creates (by the env marker set in nodeTerminalOptions), never the
+ * node's own terminal. `containerName` is left null: the container is owned — and
+ * removed — by the node's own terminal record, so this extra shell only needs its
+ * terminal disposed. Copies the node's mounts so {{open}} still reverse-maps
+ * container paths when this terminal is the active one.
+ */
+function trackNodeTerminal(term) {
+  const opts = term.creationOptions || {};
+  const nodeName = opts.env && opts.env.ROCKDEMO_NODE_TERMINAL;
+  if (!nodeName) return;
+  const entry = runningScenarioEntry;
+  if (!entry || entry.disposed || !entry.terminals) return;
+  const node = (entry.nodes || []).find((n) => n.name === nodeName);
+  if (!node) return;
+  const src = entry.terminals.find((r) => r.name === node.name && r.containerName);
+  entry.terminals.push({
+    name: node.name,
+    terminal: term,
+    containerName: null, // the node's own record owns the container removal
+    mounts: (src && src.mounts) || [],
+  });
+  // Attach a fresh shell to the RUNNING container as a command in the host shell
+  // (NOT as the terminal's process — see nodeTerminalOptions), then `clear` to
+  // hide the exec line. `cmd` from the node config (fallback `sh`) matches the
+  // shell the node's own terminal launched with.
+  term.sendText(
+    `docker exec -it ${containerNameFor(node.name)} ${node.cmd || "sh"}`,
+    true
+  );
+  term.sendText("clear", true);
+  // Reveal AND focus the new terminal (show() defaults to preserveFocus=false),
+  // so the cursor lands in it ready to type — for both the command and the `+`
+  // dropdown profile, whose provider gives us no handle to focus otherwise.
+  term.show();
+}
+
 function activate(context) {
   // Remember the install location so webviews can load vendored assets
   // (the bundled syntax highlighter) via webview.asWebviewUri.
@@ -2944,6 +3065,35 @@ function activate(context) {
     vscode.commands.registerCommand("rockdemo.clearCache", async () => {
       notifyCacheCleared(await clearCacheVolumes());
     })
+  );
+
+  // Open a new terminal attached to a running scenario node (`docker exec`).
+  // Available from the Command Palette while a scenario runs and — via the
+  // terminal profile below — from the terminal view's `+` dropdown.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("rockdemo.newNodeTerminal", async () => {
+      const node = await pickRunningNode();
+      if (!node) return;
+      // onDidOpenTerminal → trackNodeTerminal registers and focuses it.
+      vscode.window.createTerminal(nodeTerminalOptions(node));
+    })
+  );
+
+  // Terminal-profile entry in the `+` dropdown; picks the node, then attaches.
+  context.subscriptions.push(
+    vscode.window.registerTerminalProfileProvider("rockdemo.nodeTerminal", {
+      async provideTerminalProfile() {
+        const node = await pickRunningNode();
+        if (!node) return undefined; // cancels terminal creation
+        return new vscode.TerminalProfile(nodeTerminalOptions(node));
+      },
+    })
+  );
+
+  // Track ad-hoc node terminals (from either entry point) so a scenario Stop
+  // disposes them too. Ignores every terminal that isn't one of ours.
+  context.subscriptions.push(
+    vscode.window.onDidOpenTerminal(trackNodeTerminal)
   );
 
   // Stop the scenario AND clear the cache in one go (the STOP dropdown option).

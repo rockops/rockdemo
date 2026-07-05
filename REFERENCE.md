@@ -131,6 +131,21 @@ chosen font size persist across **RESTART**.
 
 The player auto-rebuilds when you save the `index.json` or any step markdown.
 
+#### Extra terminals on a node
+
+While a scenario is running you can open **additional** shells on any node's
+container — handy for watching logs while you type commands in the main terminal.
+Two entry points, both attaching a fresh shell via `docker exec` (using the
+node's `cmd`, falling back to `sh`):
+
+- **Terminal view `+` dropdown** → **rockDemo: Node Shell**.
+- **Command Palette** → **rockDemo: New terminal on node**.
+
+With one node the shell opens immediately; with several you pick the node. These
+extra terminals are torn down with the scenario (STOP / CLOSE / RESTART). *(VS
+Code terminal profiles are static, so the `+` dropdown shows a single entry that
+prompts for the node rather than one entry per live node.)*
+
 ### `index.json` shape
 
 ```json
@@ -183,6 +198,12 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
   order defines the implicit positional aliases `host1`/`host01`, `host2`/
   `host02`, … (a legacy `{ name: {…} }` map is still accepted, but a map has no
   guaranteed order — prefer the list).
+- `backendExtended.layout` — optional terminal layout for the node terminals:
+  `"stacked"` (default) opens each node as its own panel **tab**; `"split"` opens
+  every node after the first **side-by-side** in one panel group. It's a
+  shorthand for setting `split` on every node but the first — for fine-grained
+  grouping (some tabbed, some split), omit `layout` and set the per-node `split`
+  flag instead. A `backends.json` profile may carry `layout` too.
 
 #### Per-node fields (both `backends.json` profiles and `backendExtended`)
 
@@ -193,6 +214,7 @@ The player auto-rebuilds when you save the `index.json` or any step markdown.
 | `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
 | `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
+| `split` | Optional. `true` → open this node's terminal **side-by-side** with the previous node's (in the same panel group) instead of as its own stacked tab. A node without `split` starts a fresh group; following `split` nodes join it — so groups are formed by runs of `split` nodes. The first node is always a new tab (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets this on every node but the first. |
 | `background` | Optional. A **script file** (path relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
 | `foreground` | Optional. A **script file** (path relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
 
@@ -360,7 +382,8 @@ the same shape as a `backendExtended` block:
 
 `nodes` is an **ordered list** (the order sets the implicit `host1`/`host2` …
 positional aliases). A multi-node profile such as `kubernetes-kubeadm-2nodes`
-just lists more entries.
+just lists more entries. A profile may also set `layout` (or per-node `split`) to
+open its terminals side-by-side instead of as stacked tabs.
 
 A profile node may also carry `background`/`foreground` **script files** that run
 automatically when the env starts (see the per-node fields table above). The

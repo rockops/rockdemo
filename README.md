@@ -51,6 +51,34 @@ step markdown files.
 
 **Stop any time** with the **⏹ Stop** button in the title bar.
 
+### Presenting: DEMO mode & font size
+
+The player has a small control cluster pinned to the **top-right** on every
+screen:
+
+- **A− / A+** — resize the player *and* terminal fonts together for readability.
+- **🖥 DEMO MODE** — toggle **projection mode**: a light, high-contrast theme with
+  larger fonts, forced on *both* the player and the node terminals regardless of
+  your VS Code theme, so a scenario reads well on a projector or shared screen.
+  Click again (**🖥 EXIT DEMO MODE**) to return to your normal look.
+
+Both settings persist across **RESTART** and reloads. Exiting DEMO mode — or
+stopping the scenario — restores your original terminal colors and font size.
+
+### Extra terminals on a node
+
+Need a second shell on a node — e.g. to tail logs while you type commands in the
+first? While a scenario is running you can open more terminals attached to any
+node's container:
+
+- **Terminal panel `+` dropdown** → **rockDemo: Node Shell**, or
+- **Command Palette** → **rockDemo: New terminal on node**.
+
+With a single node the terminal opens on it immediately; with several, you pick
+which node. Each opens a fresh shell on the running container using that node's
+configured shell (falling back to `sh`), and closes automatically when the
+scenario ends.
+
 ### Try it
 
 The repo ships runnable examples — open one and click **▶ Run demo**:
@@ -79,6 +107,33 @@ there: **https://killercoda.com/creators**. In short, a scenario folder has an
 `index.json` describing the environment (`backend` / nodes) and an ordered list of
 steps (`details.steps`), each pointing at a markdown file. Annotate commands in
 that markdown with `{{exec}}` (run), `{{copy}}`, or `{{open}}`.
+
+### Multi-node environments (`backendExtended`)
+
+Killercoda scenarios select an environment with a single `backend.imageid`.
+rockDemo adds an optional **`backendExtended`** block for richer, multi-container
+setups — an ordered list of nodes, each with its own image, shell (`cmd`), static
+IP, Docker-in-Docker, systemd, startup scripts, and terminal layout (stacked tabs
+or a side-by-side split via `layout` / per-node `split`):
+
+```jsonc
+"backendExtended": {
+  "layout": "split",                 // "stacked" (default) | "split"
+  "nodes": [
+    { "name": "controlplane", "imageid": "…", "cmd": "bash", "ip": "172.30.1.2" },
+    { "name": "node01",       "imageid": "…", "cmd": "bash", "ip": "172.30.1.3" }
+  ]
+}
+```
+
+> **⚠️ Not Killercoda-compatible.** `backendExtended` is a **rockDemo-only**
+> extension — Killercoda does not understand it and will ignore it, so a scenario
+> that depends on it won't reproduce the same environment there. If you need your
+> scenario to run on Killercoda too, stick to `backend.imageid`; reach for
+> `backendExtended` when you specifically want rockDemo's multi-node features.
+
+The full node schema (all fields, networking, layout, backend startup scripts)
+is in the **[technical reference](REFERENCE.md)**.
 
 For rockDemo-specific behavior and the exact `index.json` fields it supports
 (backends, multi-node networking, assets, step gating, traffic links), see the
