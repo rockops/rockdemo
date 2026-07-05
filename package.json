@@ -54,6 +54,14 @@
         "command": "rockdemo.stop",
         "title": "rockDemo: Stop demo",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "rockdemo.stopAndClearCache",
+        "title": "rockDemo: Stop and clear image cache"
+      },
+      {
+        "command": "rockdemo.clearCache",
+        "title": "rockDemo: Clear image cache"
       }
     ],
     "menus": {
@@ -77,6 +85,11 @@
           "command": "rockdemo.stop",
           "when": "activeWebviewPanelId == 'rockdemo.demo'",
           "group": "navigation@-1"
+        },
+        {
+          "command": "rockdemo.stopAndClearCache",
+          "when": "rockdemo.scenarioRunning",
+          "group": "1_rockdemo@1"
         }
       ],
       "commandPalette": [
@@ -95,6 +108,10 @@
         {
           "command": "rockdemo.stop",
           "when": "false"
+        },
+        {
+          "command": "rockdemo.stopAndClearCache",
+          "when": "rockdemo.scenarioRunning"
         }
       ]
     }

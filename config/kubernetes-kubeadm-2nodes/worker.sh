@@ -13,12 +13,9 @@ grep -q ' k8scp$' /etc/hosts || echo "$CP_IP k8scp" >> /etc/hosts
 echo 'Waiting for containerd...'
 until crictl info >/dev/null 2>&1; do sleep 1; done
 
-# Import the images baked into the image into containerd (visible in this
-# terminal, one per line) so the join's kube-proxy/pause/Cilium images come from
-# the warm cache instead of the network.
-echo 'Importing preloaded container images...'
-rockdemo-preload-images.sh
-
+# The join's kube-proxy/pause/Cilium images are pulled from the network on the
+# FIRST run and cached in the persistent /var/lib/containerd volume (see
+# src/extension.js), so subsequent runs start warm.
 echo 'Waiting for the control-plane API (k8scp:6443)...'
 until curl -sk https://k8scp:6443/healthz >/dev/null 2>&1; do sleep 3; done
 

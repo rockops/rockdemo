@@ -9,8 +9,8 @@
 #
 # kubeadm-config.yaml lives alongside this script and is mounted read-only at
 # $CFG inside the container. The add-on manifests (Cilium, local-path) are baked
-# into the image at $MANIFESTS — same files the preload step derives from, so the
-# applied versions and the warm image cache can never drift.
+# into the image at $MANIFESTS and applied with `kubectl apply`, which pulls their
+# images on the first run.
 set -e
 CFG=/var/rockdemo/config/kubernetes-kubeadm-1node
 MANIFESTS=/opt/rockdemo/manifests
@@ -30,19 +30,17 @@ done
 echo 'Waiting for containerd...'
 until crictl info >/dev/null 2>&1; do sleep 1; done
 
-# Import the images baked into the image into containerd (visible in this
-# terminal, one per line) so kubeadm/kubelet start from the warm cache instead of
-# pulling from the network.
-echo 'Importing preloaded container images...'
-rockdemo-preload-images.sh
-
-echo 'Initialising the control plane with kubeadm (this takes a couple of minutes)...'
+# Runtime images are pulled from the network on the FIRST run and cached in the
+# persistent /var/lib/containerd volume (see src/extension.js), so subsequent
+# runs start warm. The first run therefore takes longer while kubeadm/kubelet and
+# the manifest applies below pull ~1.3 GB.
+echo 'Initialising the control plane with kubeadm (first run pulls images; this takes a few minutes)...'
 # Pin the version to the installed kubeadm binary (the single k8s version knob —
 # set by KUBE_PKG_VERSION in the image). kubeadm rejects --kubernetes-version
 # alongside --config, so inject it into the config's placeholder line instead
 # (the mount is read-only, so render a copy in /tmp). Pinning avoids kubeadm
 # fetching the latest patch from the internet — which would skew from the
-# installed kubelet and miss the preloaded control-plane images.
+# installed kubelet/kubeadm.
 RENDERED_CONFIG=/tmp/kubeadm-config.yaml
 sed "s|^kubernetesVersion:.*|kubernetesVersion: $(kubeadm version -o short)|" \
   "$CFG/kubeadm-config.yaml" > "$RENDERED_CONFIG"
@@ -56,8 +54,13 @@ cp -f /etc/kubernetes/admin.conf /root/.kube/config
 # Single node: let workloads schedule on the control plane.
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 
-echo 'Installing the Cilium CNI...'
+# Apply BOTH add-ons up front (Cilium CNI + the Rancher local-path storage
+# provisioner) so their images pull and their pods roll out in parallel, rather
+# than serializing storage behind the Cilium/node-Ready waits below. Both are
+# baked into the image and version-pinned in the manifests.
+echo 'Installing the Cilium CNI and local-path storage provisioner...'
 kubectl apply -f "$MANIFESTS/cilium-cni.yaml"
+kubectl apply -f "$MANIFESTS/local-path-storage.yaml"
 
 echo 'Waiting for the node to become Ready (Cilium must be up first)...'
 kubectl wait --for=condition=Ready node --all --timeout=300s
@@ -66,11 +69,9 @@ echo 'Waiting for the Cilium components to be ready...'
 kubectl -n kube-system rollout status daemonset/cilium --timeout=300s
 kubectl -n kube-system rollout status deployment/cilium-operator --timeout=300s
 
-# Storage: install the Rancher local-path provisioner (baked into the image,
-# version pinned in the manifest) and make it the default StorageClass, so PVCs
-# bind out of the box on this single node.
-echo 'Installing the local-path storage provisioner...'
-kubectl apply -f "$MANIFESTS/local-path-storage.yaml"
+# Storage rolled out alongside Cilium above; wait for it and make it the default
+# StorageClass so PVCs bind out of the box on this single node.
+echo 'Waiting for the local-path storage provisioner...'
 kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
 kubectl patch storageclass local-path \
   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'

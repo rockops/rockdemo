@@ -99,62 +99,21 @@ RUN printf 'overlay\nbr_netfilter\n' > /etc/modules-load.d/k8s.conf \
       > /etc/sysctl.d/k8s.conf
 
 # --- cluster add-on manifests (applied at cluster start by the foreground scripts) ---
-# Cilium (CNI) and Rancher local-path (storage). The preload step below derives
-# the images to pre-pull by grepping these files, so the cache can never drift
-# from what actually runs. The Cilium cilium/operator tags are TEMPLATED
-# (__CILIUM_VERSION__) and stamped here from versions.env, so the Cilium version
-# lives in one place; the storage/busybox tags live in the local-path manifest.
+# Cilium (CNI) and Rancher local-path (storage). The Cilium cilium/operator tags
+# are TEMPLATED (__CILIUM_VERSION__) and stamped here from versions.env, so the
+# Cilium version lives in one place; the storage/busybox tags live in the
+# local-path manifest.
 COPY manifests/ /opt/rockdemo/manifests/
 RUN . /etc/rockdemo-versions.env \
  && sed -i "s|__CILIUM_VERSION__|v${CILIUM_VERSION}|g" /opt/rockdemo/manifests/cilium-cni.yaml \
  && ! grep -q '__CILIUM_VERSION__' /opt/rockdemo/manifests/cilium-cni.yaml
 
-# --- pre-pull every runtime container image as a tarball (startup speedup) ---
-# The single biggest cost of bringing up the cluster at runtime is pulling the
-# control-plane images (~700 MB) and Cilium (~600 MB) over the network on every
-# start. We can't pre-pull them into /var/lib/containerd because rockDemo mounts
-# a fresh anonymous volume there at runtime (nested overlay can't stack — see
-# startNamedContainer), which would shadow them. Instead we download each image
-# here as a docker-archive TARBALL into /opt/rockdemo/preload (a normal image
-# path, not shadowed); the backend foreground scripts import them into the
-# volume-backed containerd at cluster start (rockdemo-preload-images.sh), printing
-# each image so the user watches it happen. skopeo pulls straight from the
-# registry into a tar with no daemon and no privileges — so this works in a plain
-# `docker build`, unlike `kubeadm config images pull` which needs containerd.
-#
-# The ref list is DERIVED, never restated, so it can't drift from what runs:
-#   - control-plane images: `kubeadm config images list` pinned to the INSTALLED
-#     kubeadm's version (`kubeadm version -o short`, itself set by KUBE_PKG_VERSION
-#     above — the single Kubernetes version knob). Pinning matters: with no
-#     version kubeadm resolves the latest patch from the internet, which would
-#     drift from the installed kubelet/kubeadm.
-#   - add-on images: every `image:` line in the manifests COPYed above.
-# Refs are tag-only, exactly matching what kubelet requests, so at runtime
-# containerd finds them present (IfNotPresent) and never re-pulls.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends skopeo \
- && mkdir -p /opt/rockdemo/preload \
- && REFS="$(kubeadm config images list --kubernetes-version="$(kubeadm version -o short)") \
-      $(grep -rhE '^[[:space:]]*image:' /opt/rockdemo/manifests/ \
-        | sed -E 's/.*image:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/' | sort -u)" \
- && : > /opt/rockdemo/preload/images.list \
- && for ref in $REFS; do \
-      name="$(echo "$ref" | sed 's|[/:@]|_|g')"; \
-      echo "pre-pulling $ref"; \
-      skopeo copy --retry-times 5 --quiet \
-        "docker://$ref" "docker-archive:/opt/rockdemo/preload/${name}.tar:$ref"; \
-      echo "$ref" >> /opt/rockdemo/preload/images.list; \
-    done \
- && apt-get purge -y skopeo \
- && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/*
-
-# Importer for the baked-in image tarballs. The backend foreground scripts call
-# this at cluster start (before `kubeadm init`/`join`), so the import runs in the
-# node's terminal — the user sees each image imported — and the cluster starts
-# from a warm cache. Reads /opt/rockdemo/preload/images.list (written above).
-COPY rockdemo-preload-images.sh /usr/local/bin/rockdemo-preload-images.sh
-RUN chmod +x /usr/local/bin/rockdemo-preload-images.sh
+# Runtime container images are NOT baked into this image. They are pulled from the
+# network on the FIRST cluster start (by kubeadm/kubelet and by `kubectl apply` of
+# the manifests above) into /var/lib/containerd — which rockDemo backs with a
+# PERSISTENT named volume (see containerdCacheVolumeFor in src/extension.js). So
+# the pull happens once per machine and every subsequent run starts from that warm
+# cache. This keeps the image ~1.3 GB smaller than baking the tarballs in.
 
 WORKDIR /root
 # So kubectl in the interactive shell finds the cluster immediately once

@@ -5,7 +5,7 @@ kind: ClusterConfiguration
 # Kubernetes version has ONE source of truth: KUBE_PKG_VERSION in the image
 # Dockerfile. kubeadm needs the field present (with --config it won't take a
 # --kubernetes-version flag, and omitting it makes kubeadm fetch the latest patch
-# from the internet — which would skew from the installed binary + preload cache).
+# from the internet — which would skew from the installed binary).
 kubernetesVersion: 0.0.0
 controlPlaneEndpoint: "k8scp:6443" #<-- Use the alias we put in /etc/hosts not the IP
 networking:

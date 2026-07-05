@@ -159,6 +159,42 @@ function containerNameFor(nodeName) {
   return "rockdemo-" + nodeName.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
+// The nested-runtime storage roots given a PERSISTENT per-(image,node) cache
+// volume, so images pulled by an in-container containerd (kubeadm), Docker
+// daemon (DinD) or podman survive teardown and a second run starts warm. The
+// suffix keeps the three roots in separate volumes (they're separate data
+// stores — never mount one over another).
+const NESTED_CACHE_ROOTS = [
+  { path: "/var/lib/containerd", tag: "containerd" }, // standalone containerd (kubeadm)
+  { path: "/var/lib/docker", tag: "docker" }, // dockerd (Docker-in-Docker)
+  { path: "/var/lib/containers", tag: "containers" }, // podman
+];
+
+/**
+ * Name of a PERSISTENT nested-runtime cache volume for a node. Keyed by
+ * (imageid, nodeName, root) so the cache is tied to the BACKEND, not the
+ * scenario:
+ * - Same image → same cache, so every scenario using a given backend shares one
+ *   warm store (the whole point — pull once, reuse forever).
+ * - Different images with a colliding node name (e.g. the `ubuntu` and
+ *   `ubuntu-systemd` backends both name a node `node1`) get SEPARATE caches, so
+ *   their image stores never mix.
+ * - The node name keeps a multi-node backend's nodes apart: a 2-node kubeadm
+ *   runs two containers off the SAME image at once, and two daemons must never
+ *   share one data root (it corrupts the store) — so N nodes → N caches.
+ * - `root` (containerd/docker/containers) keeps each runtime's store in its own
+ *   volume.
+ * Safe because the volume name always contains the node name, and the container
+ * name (`rockdemo-<node>`) is a machine-wide mutex — Docker won't run two
+ * containers with that name at once (the launch force-removes a stale one) — so
+ * at most one daemon ever writes a given cache volume. The volume survives
+ * teardown (see startNamedContainer), so a second run starts warm.
+ */
+function nestedCacheVolumeFor(nodeName, imageid, tag) {
+  const safe = (s) => String(s).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  return `rockdemo-cache-${safe(imageid)}-${safe(nodeName)}-${tag}`;
+}
+
 /**
  * Valid Docker hostname derived from a node name. Hostnames (unlike container
  * names) may not contain underscores, so disallowed characters become hyphens.
@@ -176,6 +212,12 @@ const NET_SUBNET = "172.30.0.0/16";
 // resources from a previous (e.g. force-closed) session can be swept safely at
 // startup without touching unrelated Docker objects.
 const ROCKDEMO_LABEL = "rockdemo=1";
+// Label for the PERSISTENT containerd image-cache volumes. Deliberately a
+// DIFFERENT label key (`rockdemo-cache`, not `rockdemo`) so these volumes are
+// NOT caught by cleanupStaleResources' `label=rockdemo` sweep — they must
+// survive across sessions. The distinct key still lets a future "clear cache"
+// command target only these volumes.
+const ROCKDEMO_CACHE_LABEL = "rockdemo-cache=1";
 
 // Where the extension's bundled config/ folder is mounted (read-only) inside a
 // node that references backend-level scripts, so they run by path in-container.
@@ -251,8 +293,19 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // /var/lib/containerd for a standalone containerd as used by kubeadm) so the
   // inner overlay sits on a real filesystem — stacking overlay-on-overlay
   // otherwise fails with "mount overlay ... invalid argument" and no pod
-  // sandbox can ever start. The volumes are anonymous (auto-removed by --rm) but
-  // labelled, so any orphans can be swept by label. `--cgroupns=private` gives
+  // sandbox can ever start. All three are NAMED, PERSISTENT cache volumes
+  // (nestedCacheVolumeFor) that survive teardown: --rm and `docker rm -v` only
+  // drop ANONYMOUS volumes, so a named one lives on. Each is keyed by (imageid,
+  // node, root) so it's shared per BACKEND across scenarios but distinct per node
+  // and per runtime — see nestedCacheVolumeFor for why that's correct and safe.
+  // So a second run of the same backend starts from a warm image cache whether it
+  // uses containerd, Docker or podman. They carry the separate `rockdemo-cache`
+  // label so the stale-resource sweep leaves them alone (and the "clear cache"
+  // actions target exactly that label). NOTE: /var/lib/{docker,containers} hold a
+  // runtime's WHOLE data root — images AND any containers/volumes it creates — so
+  // persisting them also carries in-container state across runs; RESTART no
+  // longer wipes it (use "clear cache" for a truly clean slate).
+  // `--cgroupns=private` gives
   // each node its OWN cgroup namespace, so its kubelet's systemd-driver
   // `kubepods.slice` is scoped under the container instead of at the shared host
   // cgroup root. This is REQUIRED for multi-node kubeadm: with `=host`, every
@@ -267,9 +320,10 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // .ko files + dep metadata so the raw CNCF kubeadm procedure runs unmodified.
   const priv = privileged
     ? `--privileged --cgroupns=private ` +
-      `--mount type=volume,dst=/var/lib/docker,volume-label=${ROCKDEMO_LABEL} ` +
-      `--mount type=volume,dst=/var/lib/containers,volume-label=${ROCKDEMO_LABEL} ` +
-      `--mount type=volume,dst=/var/lib/containerd,volume-label=${ROCKDEMO_LABEL} ` +
+      NESTED_CACHE_ROOTS.map(
+        (r) =>
+          `--mount type=volume,src=${nestedCacheVolumeFor(name, imageid, r.tag)},dst=${r.path},volume-label=${ROCKDEMO_CACHE_LABEL} `
+      ).join("") +
       `-v /lib/modules:/lib/modules:ro `
     : "";
   // Drop any stale container with this name first (e.g. after a hard restart),
@@ -293,10 +347,11 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   term.sendText(
     (
       netEnsure +
-      // `-v` also drops the container's anonymous nested-runtime volumes
-      // (/var/lib/{docker,containers,containerd}); without it they orphan and
-      // accumulate across recreates, and a leftover container's containerd/etcd
-      // state could otherwise linger into the next Start.
+      // `-v` drops the container's ANONYMOUS volumes on removal, so a stale
+      // container left by a previous session doesn't orphan any. The NAMED
+      // nested-runtime cache volumes (/var/lib/{containerd,docker,containers})
+      // are deliberately NOT dropped by `-v` (named volumes survive it) — they
+      // persist as the warm image cache across runs.
       `docker rm -f -v ${containerName} >/dev/null 2>&1; ` +
       launch
     ).replace(/\s+/g, " "),
@@ -512,6 +567,18 @@ async function updateHosts(entry) {
  * container can linger — `docker rm -f` guarantees it's stopped and deleted.
  */
 function disposeEntryTerminals(entry) {
+  // Fire-and-forget: onDidDispose callers don't await teardown.
+  removeEntryContainers(entry);
+}
+
+/**
+ * Dispose the entry's terminals and force-remove their containers, returning a
+ * promise that resolves once every `docker rm` has settled. Callers that need to
+ * act *after* the containers are gone — notably clearing the persistent cache
+ * volumes, which stay in use until their container is removed — await this.
+ */
+function removeEntryContainers(entry) {
+  const removals = [];
   if (entry.terminals) {
     for (const rec of entry.terminals) {
       rec.terminal.dispose();
@@ -521,21 +588,24 @@ function disposeEntryTerminals(entry) {
         // extension-host PATH, daemon unreachable, permission denied) would
         // otherwise be swallowed and leave the container running after Stop, so
         // surface those loudly instead of hiding them.
-        execFile("docker", ["rm", "-f", "-v", rec.containerName]).catch((err) => {
-          const msg = String((err && err.stderr) || (err && err.message) || err);
-          if (/No such container/i.test(msg)) return; // already gone — expected
-          console.error(`rockDemo: failed to remove ${rec.containerName}:`, msg);
-          vscode.window.showErrorMessage(
-            `rockDemo: could not remove container ${rec.containerName} — ` +
-              `it may still be running. ${msg}`
-          );
-        });
+        removals.push(
+          execFile("docker", ["rm", "-f", "-v", rec.containerName]).catch((err) => {
+            const msg = String((err && err.stderr) || (err && err.message) || err);
+            if (/No such container/i.test(msg)) return; // already gone — expected
+            console.error(`rockDemo: failed to remove ${rec.containerName}:`, msg);
+            vscode.window.showErrorMessage(
+              `rockDemo: could not remove container ${rec.containerName} — ` +
+                `it may still be running. ${msg}`
+            );
+          })
+        );
       }
     }
   }
   entry.terminals = [];
   // Delete the staged asset copies — they're scratch, no post-mortem needed.
   if (entry.baseFsPath) wipeRunDir(entry.baseFsPath, firstNodeImage(entry));
+  return Promise.all(removals);
 }
 
 /** The first node's image (cached, so the cleanup container needs no pull). */
@@ -1858,8 +1928,8 @@ const CLIENT_SCRIPT = `
         // The extension relaunches the containers and rebuilds the webview HTML
         // from scratch (resetting every gate), so we don't navigate here.
         vscode.postMessage({ nav: "restart" });
-      } else if (nav.dataset.nav === "close") {
-        vscode.postMessage({ nav: "close" });
+      } else if (nav.dataset.nav === "close" || nav.dataset.nav === "closeClear") {
+        vscode.postMessage({ nav: nav.dataset.nav });
       } else if (nav.dataset.nav === "verify") {
         nav.disabled = true;
         nav.classList.add("checking");
@@ -2230,6 +2300,7 @@ function makeMessageHandler(entry) {
     }
     else if (msg.nav === "verify") runVerify(entry, msg.step);
     else if (msg.nav === "restart") restartScenario(entry);
+    else if (msg.nav === "closeClear") endAndClearCache(entry);
     else if (msg.nav === "close" || msg.nav === "finish") {
       // CLOSE (from the end screen) ends the scenario: disposing the panel tears
       // down all node terminals/containers via onDidDispose, exactly like the
@@ -2356,6 +2427,7 @@ function scenarioHtml(data, webview) {
   // no steps — by the intro. RESTART rebuilds from scratch; CLOSE ends the
   // scenario (tears down all containers/terminals, like STOP).
   const endActions =
+    `<button data-nav="closeClear" title="End the scenario and delete the persistent image cache (next run re-pulls images)">🗑 CLOSE &amp; CLEAR CACHE</button>` +
     `<button class="primary" data-nav="restart">⟲ RESTART</button>` +
     `<button class="primary" data-nav="close">✖ CLOSE</button>`;
 
@@ -2545,6 +2617,72 @@ async function cleanupStaleResources() {
   await sweep(["network", "ls", "-q", ...f], ["network", "rm"]);
 }
 
+/**
+ * Remove every persistent containerd image-cache volume (label `rockdemo-cache`).
+ * These deliberately survive the normal stale sweep and teardown — this is the
+ * ONLY thing that deletes them, so it's always an explicit user action. A volume
+ * still bound to a running container can't be removed; those are counted as
+ * `inUse` and left alone. When `retries` > 0 the still-in-use ones are retried
+ * (with a 1s pause), which lets a caller fire an async container teardown and
+ * then clear the volumes it frees. Returns { removed, inUse }.
+ */
+async function clearCacheVolumes({ retries = 0 } = {}) {
+  const list = async () => {
+    try {
+      const { stdout } = await execFile("docker", [
+        "volume", "ls", "-q", "--filter", "label=rockdemo-cache",
+      ]);
+      return stdout.split(/\s+/).filter(Boolean);
+    } catch (err) {
+      return []; // docker missing/unreachable — nothing we can do
+    }
+  };
+  let removed = 0;
+  let inUse = 0;
+  for (let attempt = 0; ; attempt++) {
+    const vols = await list();
+    if (!vols.length) break;
+    inUse = 0;
+    for (const v of vols) {
+      try {
+        await execFile("docker", ["volume", "rm", v]);
+        removed++;
+      } catch (err) {
+        const msg = String((err && err.stderr) || (err && err.message) || err);
+        if (/in use|being used/i.test(msg)) inUse++;
+        // other errors (already gone, etc.): skip quietly
+      }
+    }
+    if (inUse === 0 || attempt >= retries) break;
+    await delay(1000); // give an in-flight `docker rm -f` time to release them
+  }
+  return { removed, inUse };
+}
+
+/**
+ * End the scenario AND clear the image cache (the end-screen "CLOSE & CLEAR
+ * CACHE" action). The scenario's own containers still hold their cache volumes,
+ * so remove the containers FIRST (awaited) before deleting the now-free volumes.
+ */
+async function endAndClearCache(entry) {
+  await removeEntryContainers(entry); // frees the volumes this scenario holds
+  if (entry.panel) entry.panel.dispose(); // map cleanup + reset scenarioRunning
+  notifyCacheCleared(await clearCacheVolumes());
+}
+
+/** Report a clearCacheVolumes() result to the user. */
+function notifyCacheCleared({ removed, inUse }) {
+  if (!removed && !inUse) {
+    vscode.window.showInformationMessage("rockDemo: no image cache to clear.");
+    return;
+  }
+  let m = `rockDemo: cleared ${removed} image cache volume${removed === 1 ? "" : "s"}.`;
+  if (inUse) {
+    m += ` ${inUse} still in use — stop the scenario using them, then clear again.`;
+  }
+  vscode.window.showInformationMessage(m);
+}
+
 function activate(context) {
   // Remember the install location so webviews can load vendored assets
   // (the bundled syntax highlighter) via webview.asWebviewUri.
@@ -2578,6 +2716,26 @@ function activate(context) {
     vscode.commands.registerCommand("rockdemo.stop", () => {
       const target = runningScenarioPanel || activeDemoPanel;
       if (target) target.dispose();
+    })
+  );
+
+  // Clear the persistent image cache (all `rockdemo-cache` volumes). Housekeeping
+  // to reclaim disk or force a fresh pull; volumes bound to a running scenario
+  // are skipped and reported.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("rockdemo.clearCache", async () => {
+      notifyCacheCleared(await clearCacheVolumes());
+    })
+  );
+
+  // Stop the scenario AND clear the cache in one go (the STOP dropdown option).
+  // Disposing the panel tears the containers down asynchronously, so retry the
+  // volume removal until those in-flight `docker rm`s release them.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("rockdemo.stopAndClearCache", async () => {
+      const target = runningScenarioPanel || activeDemoPanel;
+      if (target) target.dispose();
+      notifyCacheCleared(await clearCacheVolumes({ retries: 8 }));
     })
   );
 

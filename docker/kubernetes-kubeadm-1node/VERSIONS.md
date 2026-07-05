@@ -1,10 +1,13 @@
 # Managing versions in the kubeadm backend image
 
 This image (`kubernetes-kubeadm-1node`, also used for the 2-node backend) bakes in
-everything needed to bring up a `kubeadm` cluster fast: the Kubernetes tools, the
-container runtime, and **every runtime container image pre-pulled as a tarball**
-so the cluster starts from a warm cache with no network pulls (see
-[`rockdemo-preload-images.sh`](rockdemo-preload-images.sh)).
+everything needed to bring up a `kubeadm` cluster: the Kubernetes tools, the
+container runtime, and the add-on manifests. The runtime **container images are
+not baked in** — they are pulled from the network on the **first** cluster start
+and kept in the persistent `/var/lib/containerd` cache volume that rockDemo mounts
+(see `containerdCacheVolumeFor` in `src/extension.js`), so every subsequent run
+starts warm. The version knobs below still fix which image **tags** get pulled, so
+the tags match the installed kubelet/kubeadm.
 
 ## TL;DR — change a version
 
@@ -22,8 +25,8 @@ docker build -t ghcr.io/rockops/rockdemo/kubernetes-kubeadm-1node:24.04 \
 
 Everything downstream is **derived** from those two values at build time — the apt
 package pins, the apt repo minor, the control-plane image tags (via `kubeadm`),
-the Cilium image tags in the manifest, and the pre-pulled image cache. Nothing is
-restated, so the warm cache can never drift from what the cluster runs.
+and the Cilium image tags in the manifest. Nothing is restated, so the tags the
+cluster requests can never drift from the installed kubelet/kubeadm.
 
 ## How the derivation works
 
@@ -37,8 +40,8 @@ restated, so the warm cache can never drift from what the cluster runs.
   there is no second Kubernetes version anywhere.
 - **Cilium** — `versions.env` `CILIUM_VERSION` is stamped into the templated
   `__CILIUM_VERSION__` tags in [`manifests/cilium-cni.yaml`](manifests/cilium-cni.yaml)
-  at build (cilium agent + operator). The preload list then greps `image:` out of
-  the finished manifest, so preload matches exactly.
+  at build (cilium agent + operator). `kubectl apply` of that manifest at cluster
+  start is what pulls those images.
 
 ## What still lives in a manifest (not in versions.env)
 
@@ -48,7 +51,7 @@ These are separately-versioned artifacts; each has one home:
 | --- | --- | --- |
 | **cilium-envoy** image | `manifests/cilium-cni.yaml` (real tag) | Its release tag isn't equal to the Cilium version and is constant across Cilium **patch** releases. Update it only when bumping the Cilium **minor**. |
 | **local-path** provisioner + `busybox` | `manifests/local-path-storage.yaml` | Replace this file with the upstream manifest for the storage release you want. |
-| **crictl**, **CNI plugins** | `Dockerfile` ARGs (`CRICTL_VERSION`, `CNI_PLUGINS_VERSION`) | Build-time tool downloads, not pre-pulled container images. |
+| **crictl**, **CNI plugins** | `Dockerfile` ARGs (`CRICTL_VERSION`, `CNI_PLUGINS_VERSION`) | Build-time tool downloads (binaries baked into the image), not runtime container images. |
 
 ## Recipes
 
@@ -80,16 +83,16 @@ rebuild.
 # Rebuild the base first if you changed docker/ubuntu-systemd.
 docker build -t ghcr.io/rockops/rockdemo/kubernetes-kubeadm-1node:24.04 \
   docker/kubernetes-kubeadm-1node
-
-# Confirm the preloaded tarballs match the versions you set:
-docker run --rm --entrypoint ls ghcr.io/rockops/rockdemo/kubernetes-kubeadm-1node:24.04 \
-  /opt/rockdemo/preload/
 ```
 
 Then run a scenario that uses the `kubernetes-kubeadm-1node` /
-`kubernetes-kubeadm-2nodes` backend and confirm the cluster reaches `Ready` with
-**no** `Pulling` events (`kubectl get events -A | grep -i pulling` should be
-empty — everything served from the baked-in cache).
+`kubernetes-kubeadm-2nodes` backend and confirm the cluster reaches `Ready`. Note
+the image cache is per-machine now: the **first** run of a fresh
+`/var/lib/containerd` cache pulls the images from the network (`kubectl get
+events -A | grep -i pulling` shows them), and every **subsequent** run is served
+from the persistent cache with no pulls. To force a cold check, clear the cache
+first with `docker volume rm $(docker volume ls -q --filter label=rockdemo-cache)`
+(no scenario running).
 
 CI (`.github/workflows/docker-image.yml`) rebuilds and publishes this image to
 GHCR on pushes to `main` that touch `docker/kubernetes-kubeadm-1node/**`.
