@@ -394,10 +394,61 @@ docker build -t ghcr.io/rockops/rockdemo/ubuntu:24.04 docker/ubuntu
 
 ### Docker-in-Docker
 
-A node with `"docker": true` runs `--privileged` (with `--cgroupns=host` and
-dedicated volumes for `/var/lib/docker` and `/var/lib/containers`) and rockDemo
-starts an in-container `dockerd` for it, so the scenario can run `docker`/
-`podman` *inside* the node. The daemon takes a few seconds to come up.
+A node with `"docker": true` runs `--privileged` and rockDemo starts an
+in-container `dockerd` for it, so the scenario can run `docker`/`podman` *inside*
+the node. The daemon takes a few seconds to come up. Its storage roots
+(`/var/lib/docker`, `/var/lib/containers`) are backed by the persistent cache
+described in [Persistent image cache](#persistent-image-cache), so pulled images
+survive a restart.
+
+### Persistent image cache
+
+Privileged nodes run a **nested container runtime** — a standalone containerd
+(the kubeadm backends), a Docker daemon, or podman (the `docker: true` DinD
+nodes). rockDemo backs each runtime's storage root with a **persistent named
+volume** instead of an ephemeral one:
+
+| Root | Runtime |
+| --- | --- |
+| `/var/lib/containerd` | standalone containerd (kubeadm) |
+| `/var/lib/docker` | in-container Docker daemon (DinD) |
+| `/var/lib/containers` | podman |
+
+Each volume name is keyed by **(image, node, root)**, so the cache is tied to the
+**backend**, not the scenario: every scenario using a given backend shares one
+warm store, while a multi-node backend gets one cache **per node** (two daemons
+must never share a data root). Backends built on different images never mix
+caches, even if they name a node the same. It stays safe because the container
+name (`rockdemo-<node>`) is a machine-wide mutex — only one container of a given
+node runs at a time — so at most one daemon writes each cache volume.
+
+The effect: the **first** run of a node pulls the runtime images from the network
+into the cache; **subsequent** runs (and **RESTART**) start from that warm store
+with no pulls. For kubeadm this is why the image doesn't bake the images in (no
+~1.3 GB of tarballs); for DinD/podman scenarios, images you `docker pull` /
+`podman pull` in one run are still there the next.
+
+> **Note:** `/var/lib/docker` and `/var/lib/containers` hold a runtime's *whole*
+> data root — images **and** any containers, volumes or networks it creates — so
+> persisting them carries that in-container state across runs too. **RESTART no
+> longer wipes it**; use a **clear cache** action (below) when you want a truly
+> clean slate.
+
+These cache volumes are labelled `rockdemo-cache=1` (not `rockdemo=1`), so the
+startup stale-resource sweep never deletes them and a normal **STOP** keeps them
+(that's the point — the next run stays warm). Clearing is always an **explicit**
+action, available three ways:
+
+- **Command Palette** → **rockDemo: Clear image cache** — removes all cache
+  volumes not currently in use, and reports how many were freed.
+- **End screen** → the **🗑 CLOSE & CLEAR CACHE** button — ends the scenario and
+  then clears the cache (it must close first, because a running scenario's
+  containers hold their volumes).
+- **STOP dropdown** (the `⋯` overflow next to the title-bar STOP) → **rockDemo:
+  Stop and clear image cache**.
+
+Under the hood any of these run `docker volume rm` on the `rockdemo-cache`
+volumes; a volume bound to a still-running scenario is skipped and reported.
 
 ### Safe cleanup
 
@@ -406,6 +457,11 @@ Every container, volume, and network rockDemo creates is stamped with the label
 from a VS Code window that was force-closed mid-scenario), so an unclean exit
 never leaves orphans — and unrelated Docker objects are never touched. rockDemo
 never runs `docker volume prune` or any unscoped delete.
+
+The one exception is the **persistent containerd image cache** (see
+[Persistent image cache](#persistent-image-cache)): those volumes carry a
+**separate** `rockdemo-cache=1` label precisely so the stale-resource sweep
+leaves them alone and they survive across sessions.
 
 ## Step gating (verify / foreground)
 
