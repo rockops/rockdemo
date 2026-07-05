@@ -43,6 +43,11 @@ The webview uses a small zero-dependency markdown renderer that also supports:
   `<img>`, `<div>`, `<table>`, `<details>`, headings, lists, etc.) is emitted
   verbatim instead of being escaped, so author HTML renders as intended.
 - **Blockquotes** — lines starting with `>` render as `<blockquote>`.
+- **Images** — both markdown `![alt](src)` and raw `<img src="…">` render. A
+  **relative** `src` (e.g. `./logo.png`, `../assets/logo.png`) is resolved
+  against the step/document folder and rewritten to a webview-safe URL so the
+  local file loads inside the sandboxed webview; `http(s):`/`data:` URLs pass
+  through unchanged.
 - **Syntax highlighting** — fenced code blocks are syntax-coloured with a
   **vendored** copy of [highlight.js](https://highlightjs.org/) (see
   [Third-party notices](#third-party-notices)). The theme follows the editor's
