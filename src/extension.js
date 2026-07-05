@@ -402,6 +402,15 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
     ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
       `docker exec -it ${containerName} ${shell}`
     : `docker run -it --rm ${runArgs} ${shell}`;
+  // Pull the node image up-front and VISIBLY, so a long first-time pull shows its
+  // progress in the terminal instead of the user staring at a blank screen (the
+  // detached systemd run hides it entirely, and the interactive run's pull gets
+  // wiped by the `clear` below). `docker image inspect` short-circuits when the
+  // image is already cached, so warm restarts still start instantly and offline
+  // — only a genuinely missing image hits the network. On failure we still fall
+  // through to `docker run`, which surfaces the same error.
+  const ensureImage =
+    `docker image inspect ${imageid} >/dev/null 2>&1 || docker pull ${imageid}; `;
   const launchLine = (
     netEnsure +
     // `-v` drops the container's ANONYMOUS volumes on removal, so a stale
@@ -410,12 +419,14 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
     // are deliberately NOT dropped by `-v` (named volumes survive it) — they
     // persist as the warm image cache across runs.
     `docker rm -f -v ${containerName} >/dev/null 2>&1; ` +
+    ensureImage +
     launch
   ).replace(/\s+/g, " ");
   // Wait for the host shell to be ready before typing the launch (a slow
   // ~/.bashrc otherwise swallows it — see sendAfterReady), then send it followed
-  // by `clear`: once the container shell is up it reads the buffered `clear` and
-  // wipes the screen, hiding the docker command and any image-pull noise. The
+  // by `clear`. The image pull above runs (and is watched) BEFORE the container
+  // shell comes up; the buffered `clear` is only read once that shell is ready,
+  // so it tidies the screen after startup without hiding the pull progress. The
   // returned `ready` promise resolves once the launch line has been typed, so
   // startup commands that share this terminal (the intro/backend foreground)
   // can wait and never get typed AHEAD of the launch on a slow-shell machine.
