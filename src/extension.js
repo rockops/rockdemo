@@ -1915,10 +1915,62 @@ const CLIENT_SCRIPT = `
     window.scrollTo(0, 0);
     enter(id); // let the extension run this step's background script
   }
+  // DEMO (projection) mode: force the vendored highlight.js light theme (so code
+  // blocks stay light even when the presenter's OS/VS Code is dark) by dropping
+  // the prefers-color-scheme media guard on the light sheet and muting the dark.
+  function forceHljsTheme(light) {
+    const dark = document.getElementById("hljs-dark");
+    const lite = document.getElementById("hljs-light");
+    if (dark) dark.media = light ? "not all" : "(prefers-color-scheme: dark)";
+    if (lite) lite.media = light ? "all" : "(prefers-color-scheme: light)";
+  }
+  const savedState = vscode.getState() || {};
+  // Player/terminal font size in px, adjusted by the A− / A+ buttons and kept in
+  // webview state. null = leave the stylesheet default (so NORMAL mode is only
+  // resized once the user actually asks). The terminal runs ~2px smaller.
+  let fontPx = typeof savedState.fontPx === "number" ? savedState.fontPx : null;
+  function termFont() { return fontPx == null ? undefined : fontPx - 2; }
+  function applyFont() {
+    document.body.style.fontSize = fontPx == null ? "" : fontPx + "px";
+  }
+  function bumpFont(delta) {
+    // Anchor the first bump to the mode's default size, then clamp to a sane range.
+    const base =
+      fontPx == null
+        ? document.documentElement.classList.contains("demo") ? 20 : 14
+        : fontPx;
+    fontPx = Math.max(12, Math.min(44, base + delta));
+    applyFont();
+    vscode.setState(Object.assign({}, vscode.getState(), { fontPx: fontPx }));
+    vscode.postMessage({ nav: "fontSize", termFont: termFont() });
+  }
+  // Toggle demo styling on the webview, remember it in webview state (so RESTART/
+  // reload keep it), and tell the extension to (un)style the terminals to match.
+  function setDemo(on) {
+    document.documentElement.classList.toggle("demo", on);
+    forceHljsTheme(on);
+    const toggle = document.getElementById("demo-toggle");
+    if (toggle) toggle.textContent = on ? "🖥 EXIT DEMO MODE" : "🖥 DEMO MODE";
+    vscode.setState(Object.assign({}, vscode.getState(), { demo: on }));
+    vscode.postMessage({ nav: "demoMode", on: on, termFont: termFont() });
+  }
+  // Restore persisted font + demo state after a reload/RESTART (fresh HTML).
+  applyFont();
+  if (savedState.demo) setDemo(true);
   // Fire for the initially-active section (the intro) on load.
   const initial = sections.find((s) => s.classList.contains("active"));
   if (initial) enter(initial.dataset.step);
   document.addEventListener("click", (e) => {
+    const fontBtn = e.target.closest("button[data-demo-font]");
+    if (fontBtn) {
+      bumpFont(parseInt(fontBtn.dataset.demoFont, 10) * 2); // 2px per click
+      return;
+    }
+    const demoBtn = e.target.closest("button[data-demo-toggle]");
+    if (demoBtn) {
+      setDemo(!document.documentElement.classList.contains("demo"));
+      return;
+    }
     const nav = e.target.closest("button[data-target],button[data-nav]");
     if (nav) {
       if (nav.dataset.nav === "finish") {
@@ -1956,10 +2008,13 @@ const CLIENT_SCRIPT = `
     // A step's foreground command finished → enable its (disabled) NEXT button.
     if (m.type === "foregroundDone") {
       const sec = sections.find((s) => s.dataset.step === String(m.step));
-      const btn = sec && sec.querySelector("button[data-fg-gated]");
-      if (btn) {
-        btn.disabled = false;
-        btn.removeAttribute("data-fg-gated");
+      // A screen can carry more than one gated button (the intro has both START
+      // and DEMO MODE), so un-gate every one — not just the first.
+      if (sec) {
+        sec.querySelectorAll("button[data-fg-gated]").forEach((btn) => {
+          btn.disabled = false;
+          btn.removeAttribute("data-fg-gated");
+        });
       }
       return;
     }
@@ -2058,8 +2113,8 @@ function pageHtml(webview, title, body) {
   const hljsDark = mediaUri(webview, "highlight-dark.css");
   const hljsLight = mediaUri(webview, "highlight-light.css");
   const hljsHead = hljsJs
-    ? `<link rel="stylesheet" href="${hljsDark}" media="(prefers-color-scheme: dark)" />` +
-      `<link rel="stylesheet" href="${hljsLight}" media="(prefers-color-scheme: light)" />`
+    ? `<link id="hljs-dark" rel="stylesheet" href="${hljsDark}" media="(prefers-color-scheme: dark)" />` +
+      `<link id="hljs-light" rel="stylesheet" href="${hljsLight}" media="(prefers-color-scheme: light)" />`
     : "";
   const hljsScript = hljsJs ? `<script nonce="${nonce}" src="${hljsJs}"></script>` : "";
   return `<!DOCTYPE html>
@@ -2227,6 +2282,64 @@ ${hljsHead}
     background: var(--vscode-inputValidation-errorBackground, #a1260d);
     color: var(--vscode-inputValidation-errorForeground, #fff);
   }
+  /* DEMO (projection) mode. The DEMO MODE button toggles the "demo" class on
+     <html> (persisted in webview state so it survives reload/RESTART). It forces
+     a light, high-contrast, larger-font look regardless of the user's VS Code
+     theme, so a scenario reads well on a projector. Colours are hard-coded (not
+     var(--vscode-*)) precisely because a presenter's editor is usually dark. */
+  html.demo { background: #e8eaed; }
+  html.demo body { color: #1a1a1a; font-size: 20px; line-height: 1.6; max-width: 1100px; }
+  html.demo h1, html.demo h2, html.demo h3 { border-bottom-color: #d0d7de; }
+  html.demo a { color: #0a58ca; }
+  html.demo .lead { color: #333; opacity: 1; }
+  html.demo .crumb { color: #57606a; opacity: 1; }
+  html.demo code { background: #eff1f4; color: #1a1a1a; }
+  html.demo blockquote {
+    background: #f0f3f7;
+    border-left-color: #c0c8d0;
+  }
+  html.demo .demo-cmd,
+  html.demo .code-snippet { background: #f6f8fa; border-color: #d0d7de; }
+  html.demo .code-snippet code:not(.hljs),
+  html.demo .code-snippet code.hljs { background: #f6f8fa; color: #1a1a1a; }
+  html.demo .code-snippet .code-line.hl { background: #dbe5f0; }
+  /* Persistent player controls (font A−/A+ and the DEMO-mode toggle), pinned to
+     the top-right of the player on every screen so they work at any time. */
+  #demo-controls {
+    position: fixed;
+    top: .5rem;
+    right: .7rem;
+    z-index: 10;
+    display: flex;
+    gap: .3rem;
+  }
+  #demo-controls button {
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 6px;
+    padding: .35em .7em;
+    opacity: .85;
+    color: var(--vscode-button-secondaryForeground);
+    background: var(--vscode-button-secondaryBackground);
+  }
+  #demo-controls button[data-demo-font] { font-weight: 600; padding: .35em .55em; }
+  #demo-controls button:hover { opacity: 1; }
+  html.demo #demo-controls button {
+    color: #1a1a1a;
+    background: #c3cbd4;
+    border-color: #9aa4b0;
+    opacity: 1;
+  }
+  /* Secondary nav buttons (PREV, CLOSE & CLEAR CACHE) — the theme's secondary
+     button colours wash out on the light page. Give them a visible grey with a
+     border. The coloured buttons (primary, RESTART, CLOSE) are excluded so they
+     keep their own styling. */
+  html.demo .nav button:not(.primary):not([data-nav="restart"]):not([data-nav="close"]) {
+    color: #1a1a1a;
+    background: #c3cbd4;
+    border: 1px solid #9aa4b0;
+  }
 </style>
 </head>
 <body>
@@ -2270,6 +2383,87 @@ function sendToEntryTerminal(entry, cmd, interrupt) {
   else rec.terminal.sendText(cmd, true);
 }
 
+// Terminal appearance forced while a scenario runs in DEMO (projection) mode.
+// VS Code has no per-terminal theme API, so we temporarily override the relevant
+// workspace settings (live-applied to the already-open node terminals) and put
+// them back on exit. A light, high-contrast palette + larger font reads on a
+// projector, matching the webview's demo styling.
+const DEMO_TERMINAL_FONT_SIZE = 18;
+const DEMO_TERMINAL_COLORS = {
+  "terminal.background": "#e8eaed",
+  "terminal.foreground": "#1a1a1a",
+  "terminalCursor.foreground": "#1a1a1a",
+  "terminal.selectionBackground": "#c8dcf0",
+};
+
+/**
+ * Apply the DEMO-mode terminal styling, remembering the previous workspace-level
+ * values on `entry` so restoreDemoTerminalStyle can put them back exactly (an
+ * absent previous value is restored by clearing the override). Idempotent.
+ */
+async function applyDemoTerminalStyle(entry) {
+  if (entry.demoTermApplied) return;
+  const cfg = vscode.workspace.getConfiguration();
+  const T = vscode.ConfigurationTarget.Workspace;
+  try {
+    const colorsInsp = cfg.inspect("workbench.colorCustomizations");
+    entry.prevColorCustomizations = colorsInsp && colorsInsp.workspaceValue;
+    entry.prevTerminalFontSize = (cfg.inspect("terminal.integrated.fontSize") || {})
+      .workspaceValue;
+    const merged = Object.assign(
+      {},
+      entry.prevColorCustomizations || {},
+      DEMO_TERMINAL_COLORS
+    );
+    await cfg.update("workbench.colorCustomizations", merged, T);
+    const fontSize = entry.demoTermFontSize || DEMO_TERMINAL_FONT_SIZE;
+    await cfg.update("terminal.integrated.fontSize", fontSize, T);
+    entry.demoTermApplied = true;
+  } catch (err) {
+    vscode.window.showWarningMessage(
+      `rockDemo: could not apply DEMO terminal styling (${err})`
+    );
+  }
+}
+
+/**
+ * Live-set the DEMO terminal font size (from the webview's A− / A+ buttons).
+ * Remembered on `entry` so it's reused if DEMO styling is re-applied (e.g. after
+ * RESTART); the workspace setting is only touched while DEMO styling is active.
+ */
+async function setDemoTerminalFontSize(entry, px) {
+  if (typeof px !== "number") return;
+  entry.demoTermFontSize = px;
+  if (!entry.demoTermApplied) return;
+  try {
+    await vscode.workspace
+      .getConfiguration()
+      .update(
+        "terminal.integrated.fontSize",
+        px,
+        vscode.ConfigurationTarget.Workspace
+      );
+  } catch (err) {
+    /* non-fatal: the webview font still changed */
+  }
+}
+
+/** Undo applyDemoTerminalStyle, restoring the exact previous workspace values. */
+async function restoreDemoTerminalStyle(entry) {
+  if (!entry.demoTermApplied) return;
+  const cfg = vscode.workspace.getConfiguration();
+  const T = vscode.ConfigurationTarget.Workspace;
+  entry.demoTermApplied = false; // clear first so a failed restore can't loop
+  try {
+    await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
+    await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
+  } catch (err) {
+    vscode.window.showWarningMessage(
+      `rockDemo: could not restore terminal styling after DEMO (${err})`
+    );
+  }
+}
+
 /**
  * Build the webview → extension message handler bound to one panel `entry`, so
  * each "execution window" runs commands in (and owns) its own terminal.
@@ -2298,6 +2492,13 @@ function makeMessageHandler(entry) {
       runBackground(entry, msg.step);
       runForeground(entry, msg.step);
     }
+    else if (msg.nav === "demoMode") {
+      if (msg.on) {
+        if (typeof msg.termFont === "number") entry.demoTermFontSize = msg.termFont;
+        applyDemoTerminalStyle(entry);
+      } else restoreDemoTerminalStyle(entry);
+    }
+    else if (msg.nav === "fontSize") setDemoTerminalFontSize(entry, msg.termFont);
     else if (msg.nav === "verify") runVerify(entry, msg.step);
     else if (msg.nav === "restart") restartScenario(entry);
     else if (msg.nav === "closeClear") endAndClearCache(entry);
@@ -2504,7 +2705,23 @@ function scenarioHtml(data, webview) {
     );
   }
 
-  return pageHtml(webview, scenario.title || "Scenario", sections.join("\n"));
+  // Persistent, always-visible controls (fixed in the corner, outside every
+  // section) so they work on any screen — not just the intro. A− / A+ adjust the
+  // font size (player + terminals); the toggle flips DEMO (projection) mode. The
+  // client script drives them and reflects state in their labels.
+  const demoControls =
+    `<div id="demo-controls">` +
+    `<button data-demo-font="-1" title="Decrease font size">A−</button>` +
+    `<button data-demo-font="1" title="Increase font size">A+</button>` +
+    `<button id="demo-toggle" data-demo-toggle="1"` +
+    ` title="Toggle DEMO (projection) mode — light theme + larger fonts for the player and terminals">` +
+    `🖥 DEMO MODE</button>` +
+    `</div>`;
+  return pageHtml(
+    webview,
+    scenario.title || "Scenario",
+    demoControls + sections.join("\n")
+  );
 }
 
 /** Open (or reveal) the scenario player for an index.json document. */
@@ -2567,6 +2784,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
     // Closing the player tears down all of its container shells too.
     panel.onDidDispose(() => {
       entry.disposed = true; // stop any in-flight background retry loops
+      restoreDemoTerminalStyle(entry); // put back any DEMO-mode setting overrides
       disposeEntryTerminals(entry);
       scenarioPanels.delete(key);
       if (runningScenarioPanel === panel) setScenarioRunning(null);

@@ -94,6 +94,20 @@ click **▶ Run demo** in the title bar to launch the **scenario player**:
    **START** button. If `details.intro.text` is set, that markdown file is
    rendered into the intro (with working `{{exec}}`/`{{copy}}`/`{{open}}`
    buttons).
+
+A small control cluster is pinned to the top-right of the player on **every**
+screen (it doesn't depend on the intro):
+
+- **🖥 DEMO MODE** — toggles **projection mode** on/off at any time. In DEMO mode
+  the player and the node terminals switch to a **projector-friendly look**: a
+  forced light, high-contrast theme with larger fonts, regardless of your VS Code
+  theme.
+- **A− / A+** — adjust the font size of the player (and, in DEMO mode, the node
+  terminals) in 2px steps.
+
+These are purely visual; the terminal-styling overrides are temporary and are
+reverted when you leave DEMO mode or close the scenario. Both the mode and the
+chosen font size persist across **RESTART**.
 2. On open, rockDemo starts an interactive shell in a Docker container for each
    node. **Docker is a prerequisite.** `{{exec}}` commands run *inside* the
    active node's container.
