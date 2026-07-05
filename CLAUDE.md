@@ -88,7 +88,8 @@ Read the file for detail; the notable pieces and how they fit together:
 ## Scenario schema
 
 The `index.json` schema (nodes, `details.steps`, `assets` globbing, `{{TRAFFIC_…}}`
-links, gating) is documented exhaustively in **[README.md](README.md)** — consult it
+links, gating) is documented exhaustively in **[REFERENCE.md](REFERENCE.md)** (the
+full technical reference; `README.md` is the short user-facing guide) — consult it
 before changing parsing or orchestration behaviour, and keep it in sync when you do.
 
 ## Release / publish

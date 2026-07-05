@@ -53,6 +53,12 @@
             "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04",
             "cmd": "bash",
             "ip": "172.30.2.2"
+        },
+        {
+            "name": "host3", "split": true,
+            "imageid": "alpine",
+            "cmd": "sh",
+            "ip": "172.30.3.2"
         }
       ]
     }

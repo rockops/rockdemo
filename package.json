@@ -62,8 +62,22 @@
       {
         "command": "rockdemo.clearCache",
         "title": "rockDemo: Clear image cache"
+      },
+      {
+        "command": "rockdemo.newNodeTerminal",
+        "title": "rockDemo: New terminal on node",
+        "icon": "$(add)"
       }
     ],
+    "terminal": {
+      "profiles": [
+        {
+          "id": "rockdemo.nodeTerminal",
+          "title": "rockDemo: Node Shell",
+          "icon": "$(server-process)"
+        }
+      ]
+    },
     "menus": {
       "editor/title": [
         {
@@ -111,6 +125,10 @@
         },
         {
           "command": "rockdemo.stopAndClearCache",
+          "when": "rockdemo.scenarioRunning"
+        },
+        {
+          "command": "rockdemo.newNodeTerminal",
           "when": "rockdemo.scenarioRunning"
         }
       ]
