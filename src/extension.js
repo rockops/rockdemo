@@ -252,6 +252,58 @@ function ensureNetworkCmd() {
   );
 }
 
+// Monotonic suffix so concurrent readiness probes never collide on a marker path.
+let readyProbeSeq = 0;
+
+/**
+ * Send commands to a terminal, but only ONCE its (host) shell is actually reading
+ * input. A slow `~/.bashrc` can swallow the first line typed into a freshly
+ * created terminal ("eaten input"), so the `docker run` / `docker exec` that
+ * launches a node's container is lost and the terminal never starts.
+ *
+ * The node terminals run their shell on the HOST (the docker CLI is typed into a
+ * host shell), and the extension shares that filesystem — so we confirm the shell
+ * is live by asking it to create a marker file and polling for it with
+ * `fs.existsSync` (no terminal-output reading needed). We probe repeatedly (each
+ * probe is a harmless no-op that just truncates the marker) until it round-trips,
+ * then send the real commands in order. Best-effort: after a timeout we send
+ * anyway, so a shell whose filesystem we can't see is no worse off than before.
+ *
+ * Fire-and-forget: callers don't await it (the terminal record is returned
+ * synchronously; the container-up retry loops elsewhere tolerate the delay).
+ */
+async function sendAfterReady(term, cmds) {
+  const marker = path.join(
+    os.tmpdir(),
+    `rockdemo-ready-${process.pid}-${readyProbeSeq++}`
+  );
+  const probe = `: > "${marker}" 2>/dev/null`;
+  try {
+    // Poll every 200ms (snappy once the shell wakes), but only (re)send the probe
+    // every ~2s: the PTY buffers a probe typed during ~/.bashrc and runs it as
+    // soon as the prompt is live, so one usually suffices — the resend is just a
+    // safety net for input dropped before the shell process even attached. ~20s
+    // ceiling, then we fall through and send anyway (best-effort).
+    for (let i = 0; i < 100; i++) {
+      if (i % 10 === 0) term.sendText(probe, true);
+      await delay(200);
+      if (fs.existsSync(marker)) break; // shell is live and consuming input
+    }
+  } catch (err) {
+    return; // terminal disposed mid-probe — nothing to send
+  }
+  try {
+    fs.rmSync(marker, { force: true });
+  } catch (err) {
+    /* best-effort cleanup */
+  }
+  try {
+    for (const c of cmds) term.sendText(c, true);
+  } catch (err) {
+    /* terminal disposed between the probe and the send — ignore */
+  }
+}
+
 /**
  * Start an interactive shell inside a named Docker container, in a terminal
  * named after the node. Docker is a prerequisite. `--name` lets us target the
@@ -350,24 +402,26 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
     ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
       `docker exec -it ${containerName} ${shell}`
     : `docker run -it --rm ${runArgs} ${shell}`;
-  term.sendText(
-    (
-      netEnsure +
-      // `-v` drops the container's ANONYMOUS volumes on removal, so a stale
-      // container left by a previous session doesn't orphan any. The NAMED
-      // nested-runtime cache volumes (/var/lib/{containerd,docker,containers})
-      // are deliberately NOT dropped by `-v` (named volumes survive it) — they
-      // persist as the warm image cache across runs.
-      `docker rm -f -v ${containerName} >/dev/null 2>&1; ` +
-      launch
-    ).replace(/\s+/g, " "),
-    true
-  );
-  // Once the container shell is ready it reads this and clears the screen,
-  // hiding the docker command and any image-pull noise. It runs before the
-  // foreground command (same terminal input buffer, FIFO order).
-  term.sendText("clear", true);
-  return { name, terminal: term, containerName, mounts: mounts || [] };
+  const launchLine = (
+    netEnsure +
+    // `-v` drops the container's ANONYMOUS volumes on removal, so a stale
+    // container left by a previous session doesn't orphan any. The NAMED
+    // nested-runtime cache volumes (/var/lib/{containerd,docker,containers})
+    // are deliberately NOT dropped by `-v` (named volumes survive it) — they
+    // persist as the warm image cache across runs.
+    `docker rm -f -v ${containerName} >/dev/null 2>&1; ` +
+    launch
+  ).replace(/\s+/g, " ");
+  // Wait for the host shell to be ready before typing the launch (a slow
+  // ~/.bashrc otherwise swallows it — see sendAfterReady), then send it followed
+  // by `clear`: once the container shell is up it reads the buffered `clear` and
+  // wipes the screen, hiding the docker command and any image-pull noise. The
+  // returned `ready` promise resolves once the launch line has been typed, so
+  // startup commands that share this terminal (the intro/backend foreground)
+  // can wait and never get typed AHEAD of the launch on a slow-shell machine.
+  const rec = { name, terminal: term, containerName, mounts: mounts || [] };
+  rec.ready = sendAfterReady(term, [launchLine, "clear"]);
+  return rec;
 }
 
 // Default backend profiles bundled with the extension (config/backends.json):
@@ -1065,7 +1119,7 @@ async function runBackground(entry, stepId) {
  * visible and it blocks the terminal until it finishes. `stepId` is "intro" or
  * a 0-based step index.
  */
-function runForeground(entry, stepId) {
+async function runForeground(entry, stepId) {
   const details = (entry.scenario && entry.scenario.details) || {};
   const cfg =
     stepId === "intro" ? details.intro : (details.steps || [])[Number(stepId)];
@@ -1092,6 +1146,11 @@ function runForeground(entry, stepId) {
   if (!entry.fgDone.has(stepId)) {
     entry.fgDone.add(stepId);
     fgGate(entry, stepId, "self");
+    // Wait until the node's launch line has been typed (see startNamedContainer)
+    // so this command lands in the CONTAINER shell, never ahead of `docker run`
+    // in the host shell on a slow-startup machine.
+    if (rec.ready) await rec.ready;
+    if (entry.disposed) return;
     // Reveal the node's terminal (without stealing focus) and send the command
     // as one line. The subshell scopes `cd /scenario` (the read-only scenario
     // mount where scripts live) and the "." on PATH to this run; the marker is
@@ -1157,7 +1216,7 @@ async function runBackendBackground(entry) {
  * read-only at CONFIG_MOUNT and run by path; a marker file signals completion,
  * polled hidden via `docker exec`.
  */
-function runBackendForeground(entry) {
+async function runBackendForeground(entry) {
   for (const node of entry.nodes || []) {
     if (!node.foreground) continue;
     const rec = (entry.terminals || []).find((r) => r.name === node.name);
@@ -1186,6 +1245,11 @@ function runBackendForeground(entry) {
     if (!entry.fgDone.has(sendKey)) {
       entry.fgDone.add(sendKey);
       fgGate(entry, "intro", token);
+      // Wait for the launch line to be typed first (see startNamedContainer), so
+      // this script runs in the container shell rather than ahead of `docker run`
+      // in the host shell on a slow-startup machine.
+      if (rec.ready) await rec.ready;
+      if (entry.disposed) return;
       rec.terminal.show(true);
       rec.terminal.sendText(
         `rm -f ${marker}; ( sh ${script.containerPath} ); touch ${marker}`,
@@ -3010,12 +3074,12 @@ function trackNodeTerminal(term) {
   // Attach a fresh shell to the RUNNING container as a command in the host shell
   // (NOT as the terminal's process — see nodeTerminalOptions), then `clear` to
   // hide the exec line. `cmd` from the node config (fallback `sh`) matches the
-  // shell the node's own terminal launched with.
-  term.sendText(
+  // shell the node's own terminal launched with. sendAfterReady waits for the
+  // host shell to be live first, so a slow ~/.bashrc can't swallow the exec.
+  sendAfterReady(term, [
     `docker exec -it ${containerNameFor(node.name)} ${node.cmd || "sh"}`,
-    true
-  );
-  term.sendText("clear", true);
+    "clear",
+  ]);
   // Reveal AND focus the new terminal (show() defaults to preserveFocus=false),
   // so the cursor lands in it ready to type — for both the command and the `+`
   // dropdown profile, whose provider gives us no handle to focus otherwise.
