@@ -204,6 +204,12 @@ prompts for the node rather than one entry per live node.)*
   shorthand for setting `split` on every node but the first — for fine-grained
   grouping (some tabbed, some split), omit `layout` and set the per-node `split`
   flag instead. A `backends.json` profile may carry `layout` too.
+- `backendExtended.noProxy` — optional list of IPs, CIDRs, or hostnames that
+  should **bypass** the host proxy inside the containers (see
+  [Proxy forwarding](#proxy-forwarding)). Accepts an array
+  (`["10.0.0.0/8", "svc.local"]`) or a comma-separated string. A `backends.json`
+  profile may carry `noProxy` too (the Kubernetes profiles set the pod and
+  service CIDRs there).
 
 #### Per-node fields (both `backends.json` profiles and `backendExtended`)
 
@@ -405,6 +411,36 @@ Killercoda gives nodes static IPs. When any node declares an `ip`, rockDemo:
 2. attaches every node to it with its pinned `--ip`, and
 3. appends `<ip> <hostname>` lines for all nodes to each container's
    `/etc/hosts`, so nodes can resolve one another by name.
+
+### Proxy forwarding
+
+If the host running VS Code has a proxy configured via the standard environment
+variables — `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`, and
+`NO_PROXY`/`no_proxy` — rockDemo forwards it into **every** node container. Each
+variable is re-exported in both upper- and lowercase forms so tools that honour
+only one convention still see it. This makes image pulls and in-scenario network
+calls work behind a corporate proxy without any per-scenario configuration. When
+no proxy is set on the host, nothing is injected.
+
+To make some destinations **bypass** the proxy inside the containers, set
+`noProxy` at the backend level — either `backendExtended.noProxy` in your
+scenario or `noProxy` on a `backends.json` profile. It accepts an array or a
+comma-separated string of IPs, CIDRs, or hostnames, and is merged into the
+host's `NO_PROXY`:
+
+```json
+"backendExtended": {
+  "noProxy": ["10.0.0.0/8", "registry.internal"],
+  "nodes": [ … ]
+}
+```
+
+The bundled **Kubernetes** profiles (`kubernetes-kubeadm-1node`,
+`kubernetes-kubeadm-2nodes`) set `noProxy` to the pod CIDR (`10.244.0.0/16`), the
+service CIDR (`10.96.0.0/12`), the node network (`172.30.0.0/16`), and
+`localhost`/`127.0.0.1` so cluster-internal traffic never goes through the proxy
+(routing pod/service/apiserver traffic through a proxy would otherwise break the
+cluster).
 
 ### Custom images
 

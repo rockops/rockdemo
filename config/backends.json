@@ -8,10 +8,10 @@
   "alpine": { "nodes": [
     { "name": "node1", "imageid": "alpine", "ip": "172.30.1.2", "cmd": "sh" }
   ] },
-  "kubernetes-kubeadm-1node": { "nodes": [
+  "kubernetes-kubeadm-1node": { "noProxy": ["10.244.0.0/16", "10.96.0.0/12", "172.30.0.0/16", "localhost", "127.0.0.1"], "nodes": [
     { "name": "controlplane", "alias": "host01", "imageid": "ghcr.io/rockops/rockdemo/kubernetes-kubeadm-1node:24.04", "cmd": "bash", "ip": "172.30.1.2", "docker": true, "systemd": true, "background": "kubernetes-kubeadm-1node/background.sh", "foreground": "kubernetes-kubeadm-1node/startup.sh" }
   ] },
-  "kubernetes-kubeadm-2nodes": { "nodes": [
+  "kubernetes-kubeadm-2nodes": { "noProxy": ["10.244.0.0/16", "10.96.0.0/12", "172.30.0.0/16", "localhost", "127.0.0.1"], "nodes": [
     { "name": "controlplane", "alias": "host01", "imageid": "ghcr.io/rockops/rockdemo/kubernetes-kubeadm-1node:24.04", "cmd": "bash", "ip": "172.30.1.2", "docker": true, "systemd": true, "background": "kubernetes-kubeadm-2nodes/background.sh", "foreground": "kubernetes-kubeadm-2nodes/controlplane.sh" },
     { "name": "node01", "alias": "host02", "imageid": "ghcr.io/rockops/rockdemo/kubernetes-kubeadm-1node:24.04", "cmd": "bash", "ip": "172.30.2.2", "docker": true, "systemd": true, "background": "kubernetes-kubeadm-2nodes/background.sh", "foreground": "kubernetes-kubeadm-2nodes/worker.sh" }
   ] }

@@ -322,7 +322,7 @@ async function sendAfterReady(term, cmds) {
  * terminal beside another's instead of opening a new tab (see startNodes).
  * Returns a record: { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location, proxyArgs) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
@@ -395,9 +395,13 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // keeps running (systemd is PID 1); teardown's `docker rm -f` cleans it up.
   // `--tmpfs /run /run/lock` give systemd writable runtime dirs without
   // persisting them. Non-systemd mode is unchanged: the shell is PID 1.
+  // Forward the host's HTTP(S)_PROXY / NO_PROXY into the container (empty when
+  // no proxy is set on the host) so image pulls and in-scenario network calls
+  // work behind a corporate proxy. See proxyEnvArgs.
+  const proxy = proxyArgs ? `${proxyArgs} ` : "";
   const runArgs =
     `--label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ` +
-    `${priv}${netArgs}${pub ? pub + " " : ""}${vol} ${imageid}`;
+    `${priv}${netArgs}${pub ? pub + " " : ""}${proxy}${vol} ${imageid}`;
   const launch = systemd
     ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
       `docker exec -it ${containerName} ${shell}`
@@ -507,6 +511,63 @@ function resolveNodes(scenario) {
   return [];
 }
 
+/** Normalize a `noProxy` config value (array or comma-string) to a clean array. */
+function noProxyList(v) {
+  if (!v) return [];
+  const parts = Array.isArray(v) ? v : String(v).split(",");
+  return parts.map((s) => String(s).trim()).filter(Boolean);
+}
+
+/**
+ * Resolve the extra `noProxy` entries (IPs/CIDRs/hostnames) for a scenario's
+ * backend — the destinations that should bypass the host proxy inside the
+ * containers. Read from `backendExtended.noProxy` for a custom backend, or the
+ * matching bundled profile's `noProxy` for a `backend.imageid` key. The
+ * Kubernetes profiles carry the pod and service CIDRs here so cluster-internal
+ * traffic never goes through the proxy. See proxyEnvArgs.
+ */
+function resolveNoProxy(scenario) {
+  const ext = scenario.backendExtended;
+  if (ext && ext.nodes) return noProxyList(ext.noProxy);
+  const key = scenario.backend && scenario.backend.imageid;
+  if (key) {
+    const profile = loadBackends()[key];
+    if (profile) return noProxyList(profile.noProxy);
+  }
+  return [];
+}
+
+/**
+ * Build `docker run` env args that forward the host's HTTP(S) proxy settings into
+ * a container. Reads HTTP_PROXY / HTTPS_PROXY / NO_PROXY (and their lowercase
+ * variants) from the host environment and re-exports BOTH the upper- and
+ * lowercase forms, so tools that only honour one convention still see the proxy.
+ * `noProxyExtra` (from the backend config — e.g. a Kubernetes backend's pod and
+ * service CIDRs) is merged into NO_PROXY so intra-cluster traffic bypasses the
+ * proxy. Returns a string of `-e` args (or "" when the host has no proxy set).
+ */
+function proxyEnvArgs(noProxyExtra) {
+  const env = process.env;
+  const http = env.HTTP_PROXY || env.http_proxy;
+  const https = env.HTTPS_PROXY || env.https_proxy;
+  // Nothing to forward when the host has no proxy configured.
+  if (!http && !https) return "";
+  // Start from the host's existing NO_PROXY, then APPEND the backend config's
+  // entries after it (never replacing the host value); de-dup while preserving
+  // that order so a value set on both sides isn't listed twice.
+  const noProxy = [
+    ...noProxyList(env.NO_PROXY || env.no_proxy),
+    ...(noProxyExtra || []).flatMap((v) => noProxyList(v)),
+  ]
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .join(",");
+  const pairs = [];
+  if (http) pairs.push(["HTTP_PROXY", http], ["http_proxy", http]);
+  if (https) pairs.push(["HTTPS_PROXY", https], ["https_proxy", https]);
+  if (noProxy) pairs.push(["NO_PROXY", noProxy], ["no_proxy", noProxy]);
+  return pairs.map(([k, v]) => `-e ${k}="${v}"`).join(" ");
+}
+
 /** Launch a container terminal for every node, storing the records on entry. */
 function startNodes(entry) {
   // Fresh scratch copies for this run: wipe, then stage per node and mount.
@@ -540,6 +601,9 @@ function startNodes(entry) {
   // If any node declares a static IP, every node joins the shared rockdemo
   // network so they can communicate (those with an `ip` get pinned addresses).
   const useNet = entry.nodes.some((n) => n.ip);
+  // Forward any host proxy into every node, merging the backend's `noProxy`
+  // (e.g. Kubernetes pod/service CIDRs) so cluster-internal traffic bypasses it.
+  const proxyArgs = proxyEnvArgs(entry.noProxy);
   // Terminal grouping: a node with `split` opens beside the current group's
   // anchor terminal (side-by-side); a node without one starts a fresh group and
   // becomes the new anchor. Tracked across the ordered launch below.
@@ -569,7 +633,7 @@ function startNodes(entry) {
       const split = n.split && groupAnchor;
       const location = split ? { parentTerminal: groupAnchor } : undefined;
       const rec = startNamedContainer(
-        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
       );
       if (!split) groupAnchor = rec.terminal;
       return rec;
@@ -2865,6 +2929,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       }
     );
     const nodes = resolveNodes(scenario);
+    const noProxy = resolveNoProxy(scenario);
     const assets = (scenario.details && scenario.details.assets) || null;
     const baseFsPath = vscode.Uri.joinPath(jsonDoc.uri, "..").fsPath;
     entry = {
@@ -2872,6 +2937,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       doc: jsonDoc,
       scenario,
       nodes,
+      noProxy,
       assets,
       baseFsPath,
       terminals: [],
