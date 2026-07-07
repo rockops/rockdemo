@@ -1,0 +1,18 @@
+# Propagate the host's proxy + CA trust into the container's system daemons at
+# boot, so image pulls work behind a corporate, TLS-intercepting proxy. Runs
+# once, BEFORE containerd/dockerd start, so the EnvironmentFile it writes
+# (/run/rockdemo/proxy.env, consumed via the rockdemo-proxy.conf drop-ins) and
+# the merged CA trust are in place first. See rockdemo-proxy.sh for the full why.
+[Unit]
+Description=Propagate host proxy + CA trust to container daemons (rockDemo)
+DefaultDependencies=no
+After=sysinit.target
+Before=containerd.service docker.service multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rockdemo-proxy.sh
+
+[Install]
+WantedBy=multi-user.target

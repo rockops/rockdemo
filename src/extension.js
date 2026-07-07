@@ -223,6 +223,12 @@ const ROCKDEMO_CACHE_LABEL = "rockdemo-cache=1";
 // node that references backend-level scripts, so they run by path in-container.
 const CONFIG_MOUNT = "/var/rockdemo/config";
 
+// Where the host's CA bundle is bind-mounted (read-only) in every node, so a
+// TLS-intercepting corporate proxy's internal CA is trusted inside the
+// container. The systemd images' rockdemo-proxy.service merges it into the trust
+// store at boot (see docker/ubuntu-systemd/rockdemo-proxy.sh); see hostCaBundle.
+const HOST_CA_MOUNT = "/etc/rockdemo-host-ca.crt";
+
 /** Host path of the extension's bundled config/ folder. */
 function backendScriptRoot() {
   return path.join(extensionUri.fsPath, "config");
@@ -511,6 +517,34 @@ function resolveNodes(scenario) {
   return [];
 }
 
+/**
+ * Locate the host's trusted-CA bundle so it can be bind-mounted into the nodes —
+ * needed when a TLS-intercepting corporate proxy re-signs traffic with an
+ * internal CA the base images don't trust. Returns the first bundle that exists
+ * and is non-empty (Debian/Ubuntu/Alpine, then RHEL/Fedora, then the OpenSSL
+ * default), or null. Under the WSL/Remote extensions the extension host runs in
+ * the same environment as Docker, so these paths are the right (host) ones.
+ * Cached: undefined = not looked up yet, null = none found.
+ */
+let hostCaBundleCache;
+function hostCaBundle() {
+  if (hostCaBundleCache !== undefined) return hostCaBundleCache;
+  const candidates = [
+    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt", // RHEL, Fedora, CentOS
+    "/etc/ssl/cert.pem", // OpenSSL default
+  ];
+  hostCaBundleCache =
+    candidates.find((p) => {
+      try {
+        return fs.statSync(p).size > 0;
+      } catch (err) {
+        return false;
+      }
+    }) || null;
+  return hostCaBundleCache;
+}
+
 /** Normalize a `noProxy` config value (array or comma-string) to a clean array. */
 function noProxyList(v) {
   if (!v) return [];
@@ -608,6 +642,9 @@ function startNodes(entry) {
   // Forward any host proxy into every node, merging the backend's `noProxy`
   // (e.g. Kubernetes pod/service CIDRs) so cluster-internal traffic bypasses it.
   const proxyArgs = proxyEnvArgs(entry.noProxy);
+  // Bind-mount the host CA bundle into every node so a TLS-intercepting proxy's
+  // internal CA is trusted in-container (null when no host bundle is found).
+  const hostCa = hostCaBundle();
   // Terminal grouping: a node with `split` opens beside the current group's
   // anchor terminal (side-by-side); a node without one starts a fresh group and
   // becomes the new anchor. Tracked across the ordered launch below.
@@ -631,6 +668,11 @@ function startNodes(entry) {
       // Overlay executable copies of any scripts this node invokes by name, so a
       // non-executable source script still runs (without touching the source).
       mounts.push(...stageNodeScripts(entry, n));
+      // Mount the host CA bundle so the container trusts the same CAs the host
+      // does — the systemd images merge it into their trust store at boot
+      // (rockdemo-proxy.service), which is what lets pulls work behind a
+      // TLS-intercepting corporate proxy.
+      if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
       const ports = entry.trafficPorts.get(n.name) || [];
       // Split beside the current anchor only if there is one; otherwise this
       // node opens a new tab and becomes the anchor for any following splits.

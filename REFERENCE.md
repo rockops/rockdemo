@@ -452,6 +452,34 @@ service CIDR (`10.96.0.0/12`), the node network (`172.30.0.0/16`), and
 (routing pod/service/apiserver traffic through a proxy would otherwise break the
 cluster).
 
+#### System daemons (containerd / dockerd) and CA trust
+
+Forwarding the proxy env is enough for shell tools (`curl`, `git`, …), but the
+in-container **daemons need two more things**, both handled automatically on the
+**systemd** images (`ubuntu-systemd` and the `kubernetes-kubeadm-*` images built
+on it):
+
+- **The daemons don't inherit the container env.** `containerd`/`dockerd` run as
+  systemd units, which systemd starts with a clean environment — so the
+  `docker run -e` proxy never reaches them. A boot oneshot
+  ([rockdemo-proxy.service](docker/ubuntu-systemd/rockdemo-proxy.service)) lifts
+  the proxy out of PID 1's environment into `/run/rockdemo/proxy.env`, which
+  baked `EnvironmentFile=` drop-ins hand to both daemons before they start.
+- **TLS-intercepting proxies.** A corporate proxy that re-signs TLS with an
+  internal CA breaks image pulls (the container doesn't trust that CA). rockDemo
+  bind-mounts the **host's CA bundle** (`/etc/ssl/certs/ca-certificates.crt` or
+  the RHEL/OpenSSL equivalent) into every node at `/etc/rockdemo-host-ca.crt`,
+  and the same boot oneshot merges it into the container trust store
+  (`update-ca-certificates`). So the container trusts exactly what the host does.
+  The proxy value is forwarded **verbatim** — if the container reaches the proxy
+  at a different address than the host (e.g. `host.docker.internal` vs
+  `localhost`), set the proxy variable to that address.
+
+Because this lives in the images, it applies to the **bundled systemd images**;
+a rebuild/republish of those images is required for changes to take effect, and
+custom (`backendExtended`) images that don't inherit `ubuntu-systemd` get the
+forwarded env + mounted CA but must wire up their own daemon/trust integration.
+
 ### Custom images
 
 Killercoda's environments come with tooling pre-installed. rockDemo ships
