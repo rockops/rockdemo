@@ -414,19 +414,29 @@ Killercoda gives nodes static IPs. When any node declares an `ip`, rockDemo:
 
 ### Proxy forwarding
 
-If the host running VS Code has a proxy configured via the standard environment
-variables — `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`, and
-`NO_PROXY`/`no_proxy` — rockDemo forwards it into **every** node container. Each
-variable is re-exported in both upper- and lowercase forms so tools that honour
-only one convention still see it. This makes image pulls and in-scenario network
-calls work behind a corporate proxy without any per-scenario configuration. When
-no proxy is set on the host, nothing is injected.
+If your shell has a proxy configured via the standard environment variables —
+`HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`, and `NO_PROXY`/`no_proxy`
+— rockDemo forwards it into **every** node container. Each variable is exported
+in both upper- and lowercase forms (filled from whichever case your shell set),
+so tools that honour only one convention still see it. This makes in-scenario
+network calls work behind a corporate proxy without any per-scenario config.
+
+The proxy is read from the **integrated terminal's shell**, not from the VS Code
+process. rockDemo emits the values as shell expansions (`${HTTP_PROXY:-…}`) into
+the container-launch command, and the node terminal — which has sourced your
+`~/.bashrc` — resolves them. This is deliberate: under the **WSL / Remote**
+extensions the VS Code server runs from a *non-interactive* shell that never
+sources `~/.bashrc`, so the extension process itself has no proxy vars even when
+your interactive terminals do. Reading them in the terminal is what makes it work
+there. (Consequence: if your proxy only reaches the container over a specific
+address — e.g. `host.docker.internal` instead of `localhost` — set the proxy var
+to that address; rockDemo forwards the value verbatim and does not rewrite it.)
 
 To make some destinations **bypass** the proxy inside the containers, set
 `noProxy` at the backend level — either `backendExtended.noProxy` in your
 scenario or `noProxy` on a `backends.json` profile. It accepts an array or a
-comma-separated string of IPs, CIDRs, or hostnames, and is merged into the
-host's `NO_PROXY`:
+comma-separated string of IPs, CIDRs, or hostnames, and is appended after the
+shell's `NO_PROXY`:
 
 ```json
 "backendExtended": {

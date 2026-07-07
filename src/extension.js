@@ -395,9 +395,9 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // keeps running (systemd is PID 1); teardown's `docker rm -f` cleans it up.
   // `--tmpfs /run /run/lock` give systemd writable runtime dirs without
   // persisting them. Non-systemd mode is unchanged: the shell is PID 1.
-  // Forward the host's HTTP(S)_PROXY / NO_PROXY into the container (empty when
-  // no proxy is set on the host) so image pulls and in-scenario network calls
-  // work behind a corporate proxy. See proxyEnvArgs.
+  // Forward the shell's HTTP(S)_PROXY / NO_PROXY into the container so in-scenario
+  // network calls work behind a corporate proxy. The values are expanded by this
+  // terminal's shell (not the extension host) — see proxyEnvArgs for why.
   const proxy = proxyArgs ? `${proxyArgs} ` : "";
   const runArgs =
     `--label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ` +
@@ -538,34 +538,38 @@ function resolveNoProxy(scenario) {
 }
 
 /**
- * Build `docker run` env args that forward the host's HTTP(S) proxy settings into
- * a container. Reads HTTP_PROXY / HTTPS_PROXY / NO_PROXY (and their lowercase
- * variants) from the host environment and re-exports BOTH the upper- and
- * lowercase forms, so tools that only honour one convention still see the proxy.
- * `noProxyExtra` (from the backend config — e.g. a Kubernetes backend's pod and
- * service CIDRs) is merged into NO_PROXY so intra-cluster traffic bypasses the
- * proxy. Returns a string of `-e` args (or "" when the host has no proxy set).
+ * Build `docker run` env args that forward the host proxy into a container.
+ *
+ * The args are emitted as **shell parameter expansions** (`${HTTP_PROXY:-…}`),
+ * NOT resolved values, and rely on the launch line being typed into the node's
+ * INTERACTIVE integrated terminal — which has sourced the user's shell profile
+ * (~/.bashrc) and therefore has the proxy vars. The VS Code extension host does
+ * NOT: notably under the WSL / Remote extensions the server runs from a
+ * non-interactive shell that never sources ~/.bashrc, so `process.env` is empty
+ * there. Deferring expansion to the terminal is what makes this work in WSL.
+ *
+ * Each variable is populated from whichever case the shell set
+ * (`${HTTP_PROXY:-$http_proxy}`), so a proxy exported in only one convention
+ * still reaches the container in both. When the shell has no proxy at all the
+ * vars expand to empty strings, which every proxy-aware tool treats as "no
+ * proxy" — harmless. `noProxyExtra` (backend config, e.g. a Kubernetes backend's
+ * pod/service CIDRs) is APPENDED after the shell's NO_PROXY. Returns a string of
+ * `-e` args (single-quoted here so the `$`/`${}` reach the terminal verbatim).
  */
 function proxyEnvArgs(noProxyExtra) {
-  const env = process.env;
-  const http = env.HTTP_PROXY || env.http_proxy;
-  const https = env.HTTPS_PROXY || env.https_proxy;
-  // Nothing to forward when the host has no proxy configured.
-  if (!http && !https) return "";
-  // Start from the host's existing NO_PROXY, then APPEND the backend config's
-  // entries after it (never replacing the host value); de-dup while preserving
-  // that order so a value set on both sides isn't listed twice.
-  const noProxy = [
-    ...noProxyList(env.NO_PROXY || env.no_proxy),
-    ...(noProxyExtra || []).flatMap((v) => noProxyList(v)),
-  ]
-    .filter((v, i, a) => a.indexOf(v) === i)
-    .join(",");
-  const pairs = [];
-  if (http) pairs.push(["HTTP_PROXY", http], ["http_proxy", http]);
-  if (https) pairs.push(["HTTPS_PROXY", https], ["https_proxy", https]);
-  if (noProxy) pairs.push(["NO_PROXY", noProxy], ["no_proxy", noProxy]);
-  return pairs.map(([k, v]) => `-e ${k}="${v}"`).join(" ");
+  const extra = (noProxyExtra || []).flatMap((v) => noProxyList(v));
+  // Leading comma is intentional and harmless: it separates the shell's NO_PROXY
+  // (which may be empty) from the appended config entries; NO_PROXY parsers skip
+  // empty items. "" when the backend adds nothing.
+  const suffix = extra.length ? "," + extra.join(",") : "";
+  return [
+    '-e HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"',
+    '-e http_proxy="${http_proxy:-$HTTP_PROXY}"',
+    '-e HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"',
+    '-e https_proxy="${https_proxy:-$HTTPS_PROXY}"',
+    '-e NO_PROXY="${NO_PROXY:-$no_proxy}' + suffix + '"',
+    '-e no_proxy="${no_proxy:-$NO_PROXY}' + suffix + '"',
+  ].join(" ");
 }
 
 /** Launch a container terminal for every node, storing the records on entry. */
