@@ -436,7 +436,8 @@ To make some destinations **bypass** the proxy inside the containers, set
 `noProxy` at the backend level — either `backendExtended.noProxy` in your
 scenario or `noProxy` on a `backends.json` profile. It accepts an array or a
 comma-separated string of IPs, CIDRs, or hostnames, and is appended after the
-shell's `NO_PROXY`:
+shell's `NO_PROXY`. Every node's **name and alias** is also appended
+automatically, so node-to-node traffic by hostname always bypasses the proxy:
 
 ```json
 "backendExtended": {

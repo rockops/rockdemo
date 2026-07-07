@@ -591,7 +591,9 @@ function resolveNoProxy(scenario) {
  * `-e` args (single-quoted here so the `$`/`${}` reach the terminal verbatim).
  */
 function proxyEnvArgs(noProxyExtra) {
-  const extra = (noProxyExtra || []).flatMap((v) => noProxyList(v));
+  const extra = (noProxyExtra || [])
+    .flatMap((v) => noProxyList(v))
+    .filter((v, i, a) => a.indexOf(v) === i);
   // Leading comma is intentional and harmless: it separates the shell's NO_PROXY
   // (which may be empty) from the appended config entries; NO_PROXY parsers skip
   // empty items. "" when the backend adds nothing.
@@ -640,8 +642,10 @@ function startNodes(entry) {
   // network so they can communicate (those with an `ip` get pinned addresses).
   const useNet = entry.nodes.some((n) => n.ip);
   // Forward any host proxy into every node, merging the backend's `noProxy`
-  // (e.g. Kubernetes pod/service CIDRs) so cluster-internal traffic bypasses it.
-  const proxyArgs = proxyEnvArgs(entry.noProxy);
+  // (e.g. Kubernetes pod/service CIDRs) plus every node's name and alias — so
+  // node-to-node traffic (by hostname) always bypasses the proxy.
+  const nodeHosts = entry.nodes.flatMap((n) => [n.name, n.alias]).filter(Boolean);
+  const proxyArgs = proxyEnvArgs([...(entry.noProxy || []), ...nodeHosts]);
   // Bind-mount the host CA bundle into every node so a TLS-intercepting proxy's
   // internal CA is trusted in-container (null when no host bundle is found).
   const hostCa = hostCaBundle();
