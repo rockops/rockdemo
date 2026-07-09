@@ -3,6 +3,15 @@
 # Same as the 1-node startup, but `kubeadm init` publishes a fixed bootstrap
 # token so the worker (worker.sh) can join, and it waits for BOTH nodes Ready.
 set -e
+
+# Disable swap (required by kubeadm and kubelet)
+swapoff -a
+
+# Ensure inotify limits are sufficient for kubelet / cAdvisor / systemd
+# (proc is writable in privileged containers)
+echo 1024 > /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true
+echo 524288 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
+
 CFG=/var/rockdemo/config/kubernetes-kubeadm-2nodes       # 2-node kubeadm config
 MANIFESTS=/opt/rockdemo/manifests                        # add-on manifests baked into the image
 # The bootstrap token the worker joins with lives in $CFG/kubeadm-config.yaml

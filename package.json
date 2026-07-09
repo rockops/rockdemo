@@ -32,6 +32,26 @@
   ],
   "main": "./src/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "rockDemo",
+      "properties": {
+        "rockdemo.restoreSidebar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restore the primary sidebar (Explorer) when exiting demo mode or ending a scenario."
+        },
+        "rockdemo.restorePanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restore the bottom panel (Terminal) when exiting demo mode or ending a scenario."
+        },
+        "rockdemo.restoreAgentPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restore the agent panel (Auxiliary Bar) when exiting demo mode or ending a scenario."
+        }
+      }
+    },
     "commands": [
       {
         "command": "rockdemo.exec",

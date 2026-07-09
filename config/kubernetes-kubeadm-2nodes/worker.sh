@@ -4,6 +4,15 @@
 # controlplane.sh published. No kubeconfig here — readiness is observed from the
 # control plane (controlplane.sh waits for both nodes Ready).
 set -e
+
+# Disable swap (required by kubeadm and kubelet)
+swapoff -a
+
+# Ensure inotify limits are sufficient for kubelet / cAdvisor / systemd
+# (proc is writable in privileged containers)
+echo 1024 > /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true
+echo 524288 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
+
 TOKEN=abcdef.0123456789abcdef
 CP_IP=172.30.1.2   # control-plane static IP (see config/backends.json) = k8scp
 

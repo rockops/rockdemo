@@ -2704,13 +2704,14 @@ async function applyDemoTerminalStyle(entry) {
     await cfg.update("workbench.colorTheme", lightTheme, T);
     const fontSize = entry.demoTermFontSize || DEMO_TERMINAL_FONT_SIZE;
     await cfg.update("terminal.integrated.fontSize", fontSize, T);
-    // Clean projection layout: collapse the file-explorer side bar and the
-    // bottom panel so only the scenario instructions and the node terminals
-    // (editor panes) are on screen. Both commands only ever HIDE (no-op if
-    // already hidden); restoreDemoTerminalStyle re-reveals them on exit. VS Code
+    // Clean projection layout: collapse the file-explorer side bar, the
+    // bottom panel, and the agent panel (auxiliary bar) so only the scenario instructions
+    // and the node terminals (editor panes) are on screen. These commands only ever HIDE
+    // (no-op if already hidden); restoreDemoTerminalStyle re-reveals them on exit. VS Code
     // exposes no API to read their prior visibility, so restore always re-shows.
     await vscode.commands.executeCommand("workbench.action.closeSidebar");
     await vscode.commands.executeCommand("workbench.action.closePanel");
+    await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
     entry.demoTermApplied = true;
   } catch (err) {
     vscode.window.showWarningMessage(
@@ -2751,11 +2752,18 @@ async function restoreDemoTerminalStyle(entry) {
     await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
     await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
     await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
-    // Re-reveal the side bar and bottom panel collapsed on demo enter. focusSideBar
-    // reopens (and focuses) the side bar; togglePanel flips the panel we hid back
-    // to visible. See applyDemoTerminalStyle for why this is unconditional.
-    await vscode.commands.executeCommand("workbench.action.focusSideBar");
-    await vscode.commands.executeCommand("workbench.action.togglePanel");
+    // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
+    // on demo enter, depending on the configuration.
+    const rdCfg = vscode.workspace.getConfiguration("rockdemo");
+    if (rdCfg.get("restoreSidebar", true)) {
+      await vscode.commands.executeCommand("workbench.action.focusSideBar");
+    }
+    if (rdCfg.get("restorePanel", true)) {
+      await vscode.commands.executeCommand("workbench.action.togglePanel");
+    }
+    if (rdCfg.get("restoreAgentPanel", true)) {
+      await vscode.commands.executeCommand("workbench.action.focusAuxiliaryBar");
+    }
   } catch (err) {
     vscode.window.showWarningMessage(
       `rockDemo: could not restore terminal styling after DEMO (${err})`

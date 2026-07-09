@@ -67,7 +67,15 @@ screen:
 
 Both settings persist across **RESTART** and reloads. Exiting DEMO mode — or
 stopping the scenario — restores your original color theme, terminal colors, and
-font size, and re-reveals the side bar and panel.
+font size, and re-reveals the side bar and panels.
+
+### Panel Restoration Settings
+
+By default, exiting DEMO mode or closing the scenario re-reveals all three UI panels (the File Explorer Sidebar, the bottom Terminal panel, and the Agent Panel / Auxiliary Bar). If you prefer some of these panels to remain hidden when exiting, you can customize this in your VS Code settings under `rockDemo`:
+
+* `rockdemo.restoreSidebar` (default `true`): Restore the primary sidebar (Explorer) when exiting demo mode or ending a scenario.
+* `rockdemo.restorePanel` (default `true`): Restore the bottom panel (Terminal) when exiting demo mode or ending a scenario.
+* `rockdemo.restoreAgentPanel` (default `true`): Restore the agent panel (Auxiliary Bar/Secondary Sidebar) when exiting demo mode or ending a scenario.
 
 ### Extra terminals on a node
 
