@@ -100,7 +100,11 @@ const CTRL_C = "\x03"; // ETX (Ctrl+C)
 
 /** Send Ctrl+C to interrupt whatever is running, then the command. */
 function sendInterruptThen(term, cmd) {
-  term.sendText(CTRL_C, false);
+  // Send Ctrl+C followed by a newline. The trailing newline gives the shell a
+  // fresh prompt and absorbs the line-discipline race: when nothing is running
+  // to interrupt, the character that would otherwise be "eaten" right after the
+  // ETX is this harmless newline rather than the command's first character.
+  term.sendText(CTRL_C, true);
   term.sendText(cmd, true);
 }
 
@@ -134,9 +138,11 @@ async function runOpenBase(file, baseUri) {
     const target = vscode.Uri.joinPath(base, file);
     const doc = await vscode.workspace.openTextDocument(target);
     await vscode.window.showTextDocument(doc);
+    return doc.uri; // so a scenario can close what it opened on teardown
   } catch (err) {
     vscode.window.showErrorMessage(`rockDemo: could not open ${file} (${err})`);
   }
+  return null;
 }
 
 /** CodeLens variant: resolve against the *scenario file's* directory. */
@@ -149,9 +155,11 @@ async function openFsPath(fsPath) {
   try {
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
     await vscode.window.showTextDocument(doc);
+    return doc.uri; // so a scenario can close what it opened on teardown
   } catch (err) {
     vscode.window.showErrorMessage(`rockDemo: could not open ${fsPath} (${err})`);
   }
+  return null;
 }
 
 /** Docker-safe container name derived from a node name. */
@@ -222,6 +230,12 @@ const ROCKDEMO_CACHE_LABEL = "rockdemo-cache=1";
 // Where the extension's bundled config/ folder is mounted (read-only) inside a
 // node that references backend-level scripts, so they run by path in-container.
 const CONFIG_MOUNT = "/var/rockdemo/config";
+
+// Where the host's CA bundle is bind-mounted (read-only) in every node, so a
+// TLS-intercepting corporate proxy's internal CA is trusted inside the
+// container. The systemd images' rockdemo-proxy.service merges it into the trust
+// store at boot (see docker/ubuntu-systemd/rockdemo-proxy.sh); see hostCaBundle.
+const HOST_CA_MOUNT = "/etc/rockdemo-host-ca.crt";
 
 /** Host path of the extension's bundled config/ folder. */
 function backendScriptRoot() {
@@ -317,21 +331,23 @@ async function sendAfterReady(term, cmds) {
  * boots `/sbin/init` as PID 1 (detached) and the interactive shell is attached
  * via `docker exec` — so `systemctl` works inside, matching a real host. When
  * `systemd` is unset the shell itself is PID 1 (lighter: no init, instant
- * start), which is the default for simple scenarios. `location` (optional) is a
- * VS Code terminal `location` — pass `{ parentTerminal }` to split this node's
- * terminal beside another's instead of opening a new tab (see startNodes).
+ * start), which is the default for simple scenarios. `location` is a VS Code
+ * terminal `location` — a `{ viewColumn }` that opens this node's terminal as an
+ * editor pane in that column (see startNodes).
  * Returns a record: { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location, proxyArgs) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
-  // `location: { parentTerminal }` splits this terminal into the parent's panel
-  // group (side-by-side); no location = a new stacked tab (the default).
-  const term = vscode.window.createTerminal(
-    location ? { name, location } : name
-  );
-  term.show();
+  // `location: { viewColumn }` opens this terminal as an editor in that column.
+  const term = vscode.window.createTerminal({ name, location });
+  // Creating with a `viewColumn` already opens the terminal in its target
+  // editor column. Calling show() synchronously here would race that placement —
+  // for a column that doesn't exist yet, show() reveals a GHOST copy in the
+  // active (webview) column before VS Code moves it. So we don't show() here;
+  // editor-column terminals are focused later via the deferred panel.reveal /
+  // first.terminal.show() in startNodes.
   const vol = (mounts || [])
     .map((m) => `-v "${m.host}:${m.container}${m.ro ? ":ro" : ""}"`)
     .join(" ");
@@ -395,9 +411,13 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // keeps running (systemd is PID 1); teardown's `docker rm -f` cleans it up.
   // `--tmpfs /run /run/lock` give systemd writable runtime dirs without
   // persisting them. Non-systemd mode is unchanged: the shell is PID 1.
+  // Forward the shell's HTTP(S)_PROXY / NO_PROXY into the container so in-scenario
+  // network calls work behind a corporate proxy. The values are expanded by this
+  // terminal's shell (not the extension host) — see proxyEnvArgs for why.
+  const proxy = proxyArgs ? `${proxyArgs} ` : "";
   const runArgs =
     `--label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ` +
-    `${priv}${netArgs}${pub ? pub + " " : ""}${vol} ${imageid}`;
+    `${priv}${netArgs}${pub ? pub + " " : ""}${proxy}${vol} ${imageid}`;
   const launch = systemd
     ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
       `docker exec -it ${containerName} ${shell}`
@@ -457,6 +477,24 @@ function loadBackends() {
  * `{ name: {...} }` **map** is still accepted (its key becomes `name`), but a map
  * has no guaranteed order, so the list form is preferred.
  */
+/**
+ * Normalise a node's `split` into a direction the launcher understands:
+ * `false` (its own group), `"right"` (a pane beside the previous node) or
+ * `"down"` (a pane stacked below it). Back-compat: `split: true` and the
+ * `layout: "split"` / `"columns"` shorthands mean `"right"`; `layout: "rows"`
+ * means `"down"`. The first node can never split — nothing precedes it. The
+ * direction shapes the editor-pane grid (see startNodes).
+ */
+function splitDirection(i, layout, raw) {
+  if (i === 0) return false;
+  if (raw === "down") return "down";
+  if (raw === "right" || raw === true) return "right";
+  if (raw) return "right"; // any other truthy value → default direction
+  if (layout === "rows") return "down";
+  if (layout === "split" || layout === "columns") return "right";
+  return false;
+}
+
 function nodesFromConfig(nodes, layout) {
   const list = Array.isArray(nodes)
     ? nodes
@@ -471,12 +509,7 @@ function nodesFromConfig(nodes, layout) {
     systemd: !!n.systemd,
     background: n.background || null,
     foreground: n.foreground || null,
-    // Terminal layout: "split" opens this node's terminal side-by-side with the
-    // previous node's (in the same panel group) instead of as its own stacked
-    // tab (the default). The `layout: "split"` shorthand sets it on every node
-    // after the first; otherwise honour the per-node `split` flag. The first
-    // node can never split — there's nothing before it to split beside.
-    split: i > 0 && (layout === "split" || !!n.split),
+    split: splitDirection(i, layout, n.split),
   }));
 }
 
@@ -505,6 +538,97 @@ function resolveNodes(scenario) {
     );
   }
   return [];
+}
+
+/**
+ * Locate the host's trusted-CA bundle so it can be bind-mounted into the nodes —
+ * needed when a TLS-intercepting corporate proxy re-signs traffic with an
+ * internal CA the base images don't trust. Returns the first bundle that exists
+ * and is non-empty (Debian/Ubuntu/Alpine, then RHEL/Fedora, then the OpenSSL
+ * default), or null. Under the WSL/Remote extensions the extension host runs in
+ * the same environment as Docker, so these paths are the right (host) ones.
+ * Cached: undefined = not looked up yet, null = none found.
+ */
+let hostCaBundleCache;
+function hostCaBundle() {
+  if (hostCaBundleCache !== undefined) return hostCaBundleCache;
+  const candidates = [
+    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt", // RHEL, Fedora, CentOS
+    "/etc/ssl/cert.pem", // OpenSSL default
+  ];
+  hostCaBundleCache =
+    candidates.find((p) => {
+      try {
+        return fs.statSync(p).size > 0;
+      } catch (err) {
+        return false;
+      }
+    }) || null;
+  return hostCaBundleCache;
+}
+
+/** Normalize a `noProxy` config value (array or comma-string) to a clean array. */
+function noProxyList(v) {
+  if (!v) return [];
+  const parts = Array.isArray(v) ? v : String(v).split(",");
+  return parts.map((s) => String(s).trim()).filter(Boolean);
+}
+
+/**
+ * Resolve the extra `noProxy` entries (IPs/CIDRs/hostnames) for a scenario's
+ * backend — the destinations that should bypass the host proxy inside the
+ * containers. Read from `backendExtended.noProxy` for a custom backend, or the
+ * matching bundled profile's `noProxy` for a `backend.imageid` key. The
+ * Kubernetes profiles carry the pod and service CIDRs here so cluster-internal
+ * traffic never goes through the proxy. See proxyEnvArgs.
+ */
+function resolveNoProxy(scenario) {
+  const ext = scenario.backendExtended;
+  if (ext && ext.nodes) return noProxyList(ext.noProxy);
+  const key = scenario.backend && scenario.backend.imageid;
+  if (key) {
+    const profile = loadBackends()[key];
+    if (profile) return noProxyList(profile.noProxy);
+  }
+  return [];
+}
+
+/**
+ * Build `docker run` env args that forward the host proxy into a container.
+ *
+ * The args are emitted as **shell parameter expansions** (`${HTTP_PROXY:-…}`),
+ * NOT resolved values, and rely on the launch line being typed into the node's
+ * INTERACTIVE integrated terminal — which has sourced the user's shell profile
+ * (~/.bashrc) and therefore has the proxy vars. The VS Code extension host does
+ * NOT: notably under the WSL / Remote extensions the server runs from a
+ * non-interactive shell that never sources ~/.bashrc, so `process.env` is empty
+ * there. Deferring expansion to the terminal is what makes this work in WSL.
+ *
+ * Each variable is populated from whichever case the shell set
+ * (`${HTTP_PROXY:-$http_proxy}`), so a proxy exported in only one convention
+ * still reaches the container in both. When the shell has no proxy at all the
+ * vars expand to empty strings, which every proxy-aware tool treats as "no
+ * proxy" — harmless. `noProxyExtra` (backend config, e.g. a Kubernetes backend's
+ * pod/service CIDRs) is APPENDED after the shell's NO_PROXY. Returns a string of
+ * `-e` args (single-quoted here so the `$`/`${}` reach the terminal verbatim).
+ */
+function proxyEnvArgs(noProxyExtra) {
+  const extra = (noProxyExtra || [])
+    .flatMap((v) => noProxyList(v))
+    .filter((v, i, a) => a.indexOf(v) === i);
+  // Leading comma is intentional and harmless: it separates the shell's NO_PROXY
+  // (which may be empty) from the appended config entries; NO_PROXY parsers skip
+  // empty items. "" when the backend adds nothing.
+  const suffix = extra.length ? "," + extra.join(",") : "";
+  return [
+    '-e HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"',
+    '-e http_proxy="${http_proxy:-$HTTP_PROXY}"',
+    '-e HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"',
+    '-e https_proxy="${https_proxy:-$HTTPS_PROXY}"',
+    '-e NO_PROXY="${NO_PROXY:-$no_proxy}' + suffix + '"',
+    '-e no_proxy="${no_proxy:-$NO_PROXY}' + suffix + '"',
+  ].join(" ");
 }
 
 /** Launch a container terminal for every node, storing the records on entry. */
@@ -540,10 +664,33 @@ function startNodes(entry) {
   // If any node declares a static IP, every node joins the shared rockdemo
   // network so they can communicate (those with an `ip` get pinned addresses).
   const useNet = entry.nodes.some((n) => n.ip);
-  // Terminal grouping: a node with `split` opens beside the current group's
-  // anchor terminal (side-by-side); a node without one starts a fresh group and
-  // becomes the new anchor. Tracked across the ordered launch below.
-  let groupAnchor = null;
+  // Forward any host proxy into every node, merging the backend's `noProxy`
+  // (e.g. Kubernetes pod/service CIDRs) plus every node's name and alias — so
+  // node-to-node traffic (by hostname) always bypasses the proxy.
+  const nodeHosts = entry.nodes.flatMap((n) => [n.name, n.alias]).filter(Boolean);
+  const proxyArgs = proxyEnvArgs([...(entry.noProxy || []), ...nodeHosts]);
+  // Bind-mount the host CA bundle into every node so a TLS-intercepting proxy's
+  // internal CA is trusted in-container (null when no host bundle is found).
+  const hostCa = hostCaBundle();
+  // Terminal layout. Each node's `split` is a direction (see splitDirection):
+  // false → its own group, "right" → a pane beside the previous node, "down" →
+  // a pane stacked below it. Every node gets its OWN editor pane (viewColumn) to
+  // the right of the instruction webview. The panes start as a flat row of
+  // columns; a run of them is then reshaped into a real grid by setEditorLayout
+  // below, so "down" nodes stack vertically. Each node is its own leaf column,
+  // addressed numerically (webview column + N); ViewColumn.Beside would drift as
+  // focus moves to each freshly opened terminal (the active editor updates
+  // asynchronously).
+  //
+  // `columns` records the grid: an ordered list of columns, each an ordered list
+  // of node indices (rows). A "down" node appends a row to the current column;
+  // anything else starts a new column. Because "down" always attaches to the
+  // latest column, nodes stay contiguous per column, so their viewColumns match
+  // setEditorLayout's depth-first leaf numbering.
+  const webviewCol = (entry.panel && entry.panel.viewColumn) || vscode.ViewColumn.One;
+  const columns = [];
+  let editorCol = webviewCol; // last assigned viewColumn
+  let idx = 0;
   entry.terminals = entry.nodes
     .filter((n) => n.imageid)
     .map((n) => {
@@ -563,23 +710,54 @@ function startNodes(entry) {
       // Overlay executable copies of any scripts this node invokes by name, so a
       // non-executable source script still runs (without touching the source).
       mounts.push(...stageNodeScripts(entry, n));
+      // Mount the host CA bundle so the container trusts the same CAs the host
+      // does — the systemd images merge it into their trust store at boot
+      // (rockdemo-proxy.service), which is what lets pulls work behind a
+      // TLS-intercepting corporate proxy.
+      if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
       const ports = entry.trafficPorts.get(n.name) || [];
-      // Split beside the current anchor only if there is one; otherwise this
-      // node opens a new tab and becomes the anchor for any following splits.
-      const split = n.split && groupAnchor;
-      const location = split ? { parentTerminal: groupAnchor } : undefined;
+      editorCol += 1;
+      const location = { viewColumn: editorCol }; // own pane; grid shaped below
+      if (n.split === "down" && columns.length) {
+        columns[columns.length - 1].push(idx); // stack below the current column
+      } else {
+        columns.push([idx]); // no split, or "right" → a new column beside
+      }
       const rec = startNamedContainer(
-        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
       );
-      if (!split) groupAnchor = rec.terminal;
+      idx++;
       return rec;
     });
-  // VS Code makes the most-recently-created terminal the active one, and that
-  // selection is applied asynchronously — so a synchronous show() of the first
-  // node loses the race. Defer it to the next tick to win and select node1.
+  // Editor mode: the panes opened as a flat row of columns. If any column has
+  // more than one node (a "down" split), reshape the editor grid so those nodes
+  // stack vertically. Root orientation is horizontal (columns); a nested `groups`
+  // flips to vertical (rows) — exactly the two-level column/row grid we tracked.
+  // The first group is the webview's own column (leftmost); the rest are the node
+  // columns in order, matching the viewColumns assigned above.
+  if (columns.some((c) => c.length > 1)) {
+    const gridLayout = {
+      orientation: 0,
+      groups: [{}, ...columns.map((c) => (c.length > 1 ? { groups: c.map(() => ({})) } : {}))],
+    };
+    setTimeout(() => vscode.commands.executeCommand("vscode.setEditorLayout", gridLayout), 0);
+  }
+  // Where focus lands once everything has opened. VS Code makes the
+  // most-recently-created terminal the active editor, and that selection is
+  // applied asynchronously — so anything we do synchronously loses the race.
+  // Defer to a tick that runs after that settles (and after any grid reshape).
   if (entry.terminals.length) {
-    const first = entry.terminals[0];
-    setTimeout(() => first.terminal.show(), 0);
+    if (entry.panel) {
+      // The node terminals opened in columns to the RIGHT of the webview. Reveal
+      // the instructions in their own column WITH focus so the scenario window is
+      // what the presenter is looking at (and is guaranteed visible beside the
+      // terminals), not a node shell.
+      setTimeout(() => entry.panel.reveal(webviewCol), 0);
+    } else {
+      // No webview panel: fall back to focusing the first node's terminal.
+      const first = entry.terminals[0];
+      setTimeout(() => first.terminal.show(), 0);
+    }
   }
   // Once the containers are up, point every node's /etc/hosts at the others and
   // start the in-container Docker daemon for nodes that requested it.
@@ -658,6 +836,31 @@ async function updateHosts(entry) {
 function disposeEntryTerminals(entry) {
   // Fire-and-forget: onDidDispose callers don't await teardown.
   removeEntryContainers(entry);
+}
+
+/**
+ * Close any editor tabs the scenario opened via an "Open" button (tracked in
+ * entry.openedDocs), so ending the scenario doesn't leave its files behind.
+ * Matches tabs by URI and closes them through the tab-groups API. Best-effort.
+ */
+async function closeEntryOpenedDocs(entry) {
+  const urls = entry.openedDocs;
+  if (!urls || !urls.size) return;
+  const tabs = [];
+  for (const grp of vscode.window.tabGroups.all) {
+    for (const tab of grp.tabs) {
+      const uri = tab.input && tab.input.uri;
+      if (uri && urls.has(uri.toString())) tabs.push(tab);
+    }
+  }
+  urls.clear();
+  if (tabs.length) {
+    try {
+      await vscode.window.tabGroups.close(tabs);
+    } catch (err) {
+      /* tab already gone / user closed it — nothing to do */
+    }
+  }
 }
 
 /**
@@ -2300,14 +2503,18 @@ ${hljsHead}
     padding: 0 calc(1em - 3px);
     border-left: 3px solid var(--vscode-editorLineNumber-activeForeground, #c8a000);
   }
-  /* Inline copy/run icons rendered right after a single-backtick code span. */
+  /* Inline copy/run icons rendered right after a single-backtick code span.
+     Sized in em so they scale with the surrounding text when A+/A− or DEMO mode
+     changes the body font size. */
   .inline-act {
-    font-size: 11px;
+    font-size: 0.8em;
     line-height: 1;
     cursor: pointer;
     border: none;
     border-radius: 3px;
-    padding: .1em .35em;
+    /* The glyph is 0.8em, so extra vertical padding makes the grey box match the
+       height of the adjacent inline code span (1em text + .1em padding). */
+    padding: .25em .4em;
     margin-left: .25em;
     vertical-align: baseline;
     color: var(--vscode-button-secondaryForeground);
@@ -2386,26 +2593,12 @@ ${hljsHead}
     color: var(--vscode-inputValidation-errorForeground, #fff);
   }
   /* DEMO (projection) mode. The DEMO MODE button toggles the "demo" class on
-     <html> (persisted in webview state so it survives reload/RESTART). It forces
-     a light, high-contrast, larger-font look regardless of the user's VS Code
-     theme, so a scenario reads well on a projector. Colours are hard-coded (not
-     var(--vscode-*)) precisely because a presenter's editor is usually dark. */
-  html.demo { background: #e8eaed; }
-  html.demo body { color: #1a1a1a; font-size: 20px; line-height: 1.6; max-width: 1100px; }
-  html.demo h1, html.demo h2, html.demo h3 { border-bottom-color: #d0d7de; }
-  html.demo a { color: #0a58ca; }
-  html.demo .lead { color: #333; opacity: 1; }
-  html.demo .crumb { color: #57606a; opacity: 1; }
-  html.demo code { background: #eff1f4; color: #1a1a1a; }
-  html.demo blockquote {
-    background: #f0f3f7;
-    border-left-color: #c0c8d0;
-  }
-  html.demo .demo-cmd,
-  html.demo .code-snippet { background: #f6f8fa; border-color: #d0d7de; }
-  html.demo .code-snippet code:not(.hljs),
-  html.demo .code-snippet code.hljs { background: #f6f8fa; color: #1a1a1a; }
-  html.demo .code-snippet .code-line.hl { background: #dbe5f0; }
+     <html> (persisted in webview state so it survives reload/RESTART) and, on the
+     extension side, switches VS Code to a light color theme (see DEMO_COLOR_THEME).
+     The webview therefore inherits that light theme through the injected
+     var(--vscode-*) colours the base rules already use — so DEMO here only needs
+     to bump typography for the projector; colours stay coherent with the theme. */
+  html.demo body { font-size: 20px; line-height: 1.6; max-width: 1100px; }
   /* Persistent player controls (font A−/A+ and the DEMO-mode toggle), pinned to
      the top-right of the player on every screen so they work at any time. */
   #demo-controls {
@@ -2428,21 +2621,6 @@ ${hljsHead}
   }
   #demo-controls button[data-demo-font] { font-weight: 600; padding: .35em .55em; }
   #demo-controls button:hover { opacity: 1; }
-  html.demo #demo-controls button {
-    color: #1a1a1a;
-    background: #c3cbd4;
-    border-color: #9aa4b0;
-    opacity: 1;
-  }
-  /* Secondary nav buttons (PREV, CLOSE & CLEAR CACHE) — the theme's secondary
-     button colours wash out on the light page. Give them a visible grey with a
-     border. The coloured buttons (primary, RESTART, CLOSE) are excluded so they
-     keep their own styling. */
-  html.demo .nav button:not(.primary):not([data-nav="restart"]):not([data-nav="close"]) {
-    color: #1a1a1a;
-    background: #c3cbd4;
-    border: 1px solid #9aa4b0;
-  }
 </style>
 </head>
 <body>
@@ -2486,17 +2664,21 @@ function sendToEntryTerminal(entry, cmd, interrupt) {
   else rec.terminal.sendText(cmd, true);
 }
 
-// Terminal appearance forced while a scenario runs in DEMO (projection) mode.
-// VS Code has no per-terminal theme API, so we temporarily override the relevant
-// workspace settings (live-applied to the already-open node terminals) and put
-// them back on exit. A light, high-contrast palette + larger font reads on a
-// projector, matching the webview's demo styling.
+// Appearance forced while a scenario runs in DEMO (projection) mode. Rather than
+// hand-roll a light palette (which fought the theme's tab/editor colours), we
+// switch VS Code to a coherent light color THEME for the whole window and only
+// bump the terminal font up for the projector. The theme is the user's own
+// `workbench.preferredLightColorTheme` (the light theme VS Code's auto
+// color-scheme switching uses); `DEMO_COLOR_THEME` is only a fallback when that
+// setting is empty. Restored to the user's own theme on exit — see
+// restoreDemoTerminalStyle.
 const DEMO_TERMINAL_FONT_SIZE = 18;
+const DEMO_COLOR_THEME = "Default Light Modern";
 const DEMO_TERMINAL_COLORS = {
-  "terminal.background": "#e8eaed",
-  "terminal.foreground": "#1a1a1a",
-  "terminalCursor.foreground": "#1a1a1a",
-  "terminal.selectionBackground": "#c8dcf0",
+  // The scenario + node-terminal panes are editor groups; the theme's own group
+  // border is faint on a projector. Force a dark-grey line so the split between
+  // the instructions and each node stays clearly visible.
+  "editorGroup.border": "#5a5a5a",
 };
 
 /**
@@ -2513,14 +2695,22 @@ async function applyDemoTerminalStyle(entry) {
     entry.prevColorCustomizations = colorsInsp && colorsInsp.workspaceValue;
     entry.prevTerminalFontSize = (cfg.inspect("terminal.integrated.fontSize") || {})
       .workspaceValue;
-    const merged = Object.assign(
-      {},
-      entry.prevColorCustomizations || {},
-      DEMO_TERMINAL_COLORS
-    );
+    entry.prevColorTheme = (cfg.inspect("workbench.colorTheme") || {}).workspaceValue;
+    const merged = Object.assign({}, entry.prevColorCustomizations || {}, DEMO_TERMINAL_COLORS);
     await cfg.update("workbench.colorCustomizations", merged, T);
+    // Switch to a light theme so opened files render light with readable tokens.
+    // Prefer the user's configured light theme; fall back to a built-in one.
+    const lightTheme = cfg.get("workbench.preferredLightColorTheme") || DEMO_COLOR_THEME;
+    await cfg.update("workbench.colorTheme", lightTheme, T);
     const fontSize = entry.demoTermFontSize || DEMO_TERMINAL_FONT_SIZE;
     await cfg.update("terminal.integrated.fontSize", fontSize, T);
+    // Clean projection layout: collapse the file-explorer side bar and the
+    // bottom panel so only the scenario instructions and the node terminals
+    // (editor panes) are on screen. Both commands only ever HIDE (no-op if
+    // already hidden); restoreDemoTerminalStyle re-reveals them on exit. VS Code
+    // exposes no API to read their prior visibility, so restore always re-shows.
+    await vscode.commands.executeCommand("workbench.action.closeSidebar");
+    await vscode.commands.executeCommand("workbench.action.closePanel");
     entry.demoTermApplied = true;
   } catch (err) {
     vscode.window.showWarningMessage(
@@ -2560,6 +2750,12 @@ async function restoreDemoTerminalStyle(entry) {
   try {
     await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
     await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
+    await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
+    // Re-reveal the side bar and bottom panel collapsed on demo enter. focusSideBar
+    // reopens (and focuses) the side bar; togglePanel flips the panel we hid back
+    // to visible. See applyDemoTerminalStyle for why this is unconditional.
+    await vscode.commands.executeCommand("workbench.action.focusSideBar");
+    await vscode.commands.executeCommand("workbench.action.togglePanel");
   } catch (err) {
     vscode.window.showWarningMessage(
       `rockDemo: could not restore terminal styling after DEMO (${err})`
@@ -2579,8 +2775,13 @@ function makeMessageHandler(entry) {
       // A container-absolute path opens the host copy bind-mounted there;
       // otherwise fall back to resolving relative to the step/document.
       const hostPath = mapContainerPath(entry, msg.file);
-      if (hostPath) openFsPath(hostPath);
-      else runOpenBase(msg.file, msg.base ? vscode.Uri.parse(msg.base) : null);
+      const opened = hostPath
+        ? openFsPath(hostPath)
+        : runOpenBase(msg.file, msg.base ? vscode.Uri.parse(msg.base) : null);
+      // Remember what we opened so scenario teardown can close these editors.
+      opened.then((uri) => {
+        if (uri) (entry.openedDocs || (entry.openedDocs = new Set())).add(uri.toString());
+      });
     } else if (msg.nav === "enter") {
       // Backend-level scripts are env setup — they must run FIRST, before any
       // intro/step background/foreground. The intro is the "env start" screen,
@@ -2865,6 +3066,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       }
     );
     const nodes = resolveNodes(scenario);
+    const noProxy = resolveNoProxy(scenario);
     const assets = (scenario.details && scenario.details.assets) || null;
     const baseFsPath = vscode.Uri.joinPath(jsonDoc.uri, "..").fsPath;
     entry = {
@@ -2872,6 +3074,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       doc: jsonDoc,
       scenario,
       nodes,
+      noProxy,
       assets,
       baseFsPath,
       terminals: [],
@@ -2889,6 +3092,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
     panel.onDidDispose(() => {
       entry.disposed = true; // stop any in-flight background retry loops
       restoreDemoTerminalStyle(entry); // put back any DEMO-mode setting overrides
+      closeEntryOpenedDocs(entry); // close files opened via "Open" buttons
       disposeEntryTerminals(entry);
       scenarioPanels.delete(key);
       if (runningScenarioEntry === entry) runningScenarioEntry = null;
@@ -3147,10 +3351,20 @@ function activate(context) {
   // terminal profile below — from the terminal view's `+` dropdown.
   context.subscriptions.push(
     vscode.commands.registerCommand("rockdemo.newNodeTerminal", async () => {
+      // Capture the column of the group the command was invoked from (the
+      // terminal pane whose + button / context menu was used) BEFORE the node
+      // QuickPick steals focus — otherwise "the active group" ends up being the
+      // scenario pane and the new tab lands there instead of where we clicked.
+      const grp = vscode.window.tabGroups.activeTabGroup;
+      const targetCol = (grp && grp.viewColumn) || vscode.ViewColumn.Active;
       const node = await pickRunningNode();
       if (!node) return;
-      // onDidOpenTerminal → trackNodeTerminal registers and focuses it.
-      vscode.window.createTerminal(nodeTerminalOptions(node));
+      // onDidOpenTerminal → trackNodeTerminal registers and focuses it. Open it
+      // as a new TAB in that captured column — not a split pane — so the extra
+      // shell joins the pane the button belongs to.
+      const opts = nodeTerminalOptions(node);
+      opts.location = { viewColumn: targetCol };
+      vscode.window.createTerminal(opts);
     })
   );
 

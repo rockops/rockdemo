@@ -103,6 +103,20 @@ RUN chmod +x /usr/local/bin/rockdemo-kernel-config.sh
 COPY rockdemo-kernel-config.service /etc/systemd/system/rockdemo-kernel-config.service
 RUN systemctl enable rockdemo-kernel-config.service
 
+# Propagate the host's proxy + CA trust to the in-container daemons (containerd,
+# dockerd) at boot, so image pulls work behind a corporate, TLS-intercepting
+# proxy. systemd starts those daemons with a clean env, so rockDemo's
+# `docker run -e HTTP_PROXY=...` never reaches them; the oneshot below lifts the
+# proxy out of PID 1's environment into an EnvironmentFile the daemons read (via
+# the drop-ins), and merges the host CA bundle (bind-mounted by rockDemo at
+# /etc/rockdemo-host-ca.crt) into the trust store. See rockdemo-proxy.sh.
+COPY rockdemo-proxy.sh /usr/local/bin/rockdemo-proxy.sh
+RUN chmod +x /usr/local/bin/rockdemo-proxy.sh
+COPY rockdemo-proxy.service /etc/systemd/system/rockdemo-proxy.service
+COPY rockdemo-proxy.conf /etc/systemd/system/containerd.service.d/rockdemo-proxy.conf
+COPY rockdemo-proxy.conf /etc/systemd/system/docker.service.d/rockdemo-proxy.conf
+RUN systemctl enable rockdemo-proxy.service
+
 # Every container cloned from this image MUST get a unique /etc/machine-id.
 # Kubernetes derives a node's machineID/systemUUID from it, so when two nodes
 # (control plane + worker) boot from the same image with an identical id, they

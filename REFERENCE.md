@@ -101,13 +101,16 @@ screen (it doesn't depend on the intro):
 - **🖥 DEMO MODE** — toggles **projection mode** on/off at any time. In DEMO mode
   the player and the node terminals switch to a **projector-friendly look**: a
   forced light, high-contrast theme with larger fonts, regardless of your VS Code
-  theme.
+  theme. It also **collapses the file-explorer side bar and the bottom panel** so
+  only the scenario and its terminals remain visible.
 - **A− / A+** — adjust the font size of the player (and, in DEMO mode, the node
   terminals) in 2px steps.
 
-These are purely visual; the terminal-styling overrides are temporary and are
-reverted when you leave DEMO mode or close the scenario. Both the mode and the
-chosen font size persist across **RESTART**.
+These are purely visual; the terminal-styling and layout overrides are temporary
+and are reverted when you leave DEMO mode or close the scenario (the side bar and
+bottom panel are re-revealed). Because VS Code exposes no API to read their prior
+visibility, they are always re-shown on exit even if you had them hidden before.
+Both the mode and the chosen font size persist across **RESTART**.
 2. On open, rockDemo starts an interactive shell in a Docker container for each
    node. **Docker is a prerequisite.** `{{exec}}` commands run *inside* the
    active node's container.
@@ -198,12 +201,18 @@ prompts for the node rather than one entry per live node.)*
   order defines the implicit positional aliases `host1`/`host01`, `host2`/
   `host02`, … (a legacy `{ name: {…} }` map is still accepted, but a map has no
   guaranteed order — prefer the list).
-- `backendExtended.layout` — optional terminal layout for the node terminals:
-  `"stacked"` (default) opens each node as its own panel **tab**; `"split"` opens
-  every node after the first **side-by-side** in one panel group. It's a
-  shorthand for setting `split` on every node but the first — for fine-grained
-  grouping (some tabbed, some split), omit `layout` and set the per-node `split`
-  flag instead. A `backends.json` profile may carry `layout` too.
+- `backendExtended.layout` — optional default `split` for every node after the
+  first: `"columns"` (or the legacy `"split"`) → `"right"` (side-by-side);
+  `"rows"` → `"down"` (stacked); omit it (the default) for no split. It's a
+  shorthand — for a mixed layout, omit `layout` and set the per-node `split`
+  direction instead (see the table below). A `backends.json` profile may carry
+  `layout` too.
+- `backendExtended.noProxy` — optional list of IPs, CIDRs, or hostnames that
+  should **bypass** the host proxy inside the containers (see
+  [Proxy forwarding](#proxy-forwarding)). Accepts an array
+  (`["10.0.0.0/8", "svc.local"]`) or a comma-separated string. A `backends.json`
+  profile may carry `noProxy` too (the Kubernetes profiles set the pod and
+  service CIDRs there).
 
 #### Per-node fields (both `backends.json` profiles and `backendExtended`)
 
@@ -214,7 +223,7 @@ prompts for the node rather than one entry per live node.)*
 | `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
 | `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
-| `split` | Optional. `true` → open this node's terminal **side-by-side** with the previous node's (in the same panel group) instead of as its own stacked tab. A node without `split` starts a fresh group; following `split` nodes join it — so groups are formed by runs of `split` nodes. The first node is always a new tab (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets this on every node but the first. |
+| `split` | Optional. Splits this node's terminal from the previous node's into its own **pane**. Accepts a direction: `"right"` (a pane **beside**, side-by-side) or `"down"` (a pane **stacked below**). `true` means `"right"`. A node without `split` opens beside as a new column too — the difference is that a `"down"` node stacks under whichever column is current. The first node never splits (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets a default for every node but the first: `"split"`/`"columns"` → `"right"`, `"rows"` → `"down"`. The panes open in the editor area and form a real grid shaped by this direction. |
 | `background` | Optional. A **script file** (path relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
 | `foreground` | Optional. A **script file** (path relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
 
@@ -383,7 +392,7 @@ the same shape as a `backendExtended` block:
 `nodes` is an **ordered list** (the order sets the implicit `host1`/`host2` …
 positional aliases). A multi-node profile such as `kubernetes-kubeadm-2nodes`
 just lists more entries. A profile may also set `layout` (or per-node `split`) to
-open its terminals side-by-side instead of as stacked tabs.
+arrange its terminals into side-by-side or stacked panes.
 
 A profile node may also carry `background`/`foreground` **script files** that run
 automatically when the env starts (see the per-node fields table above). The
@@ -405,6 +414,75 @@ Killercoda gives nodes static IPs. When any node declares an `ip`, rockDemo:
 2. attaches every node to it with its pinned `--ip`, and
 3. appends `<ip> <hostname>` lines for all nodes to each container's
    `/etc/hosts`, so nodes can resolve one another by name.
+
+### Proxy forwarding
+
+If your shell has a proxy configured via the standard environment variables —
+`HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`, and `NO_PROXY`/`no_proxy`
+— rockDemo forwards it into **every** node container. Each variable is exported
+in both upper- and lowercase forms (filled from whichever case your shell set),
+so tools that honour only one convention still see it. This makes in-scenario
+network calls work behind a corporate proxy without any per-scenario config.
+
+The proxy is read from the **integrated terminal's shell**, not from the VS Code
+process. rockDemo emits the values as shell expansions (`${HTTP_PROXY:-…}`) into
+the container-launch command, and the node terminal — which has sourced your
+`~/.bashrc` — resolves them. This is deliberate: under the **WSL / Remote**
+extensions the VS Code server runs from a *non-interactive* shell that never
+sources `~/.bashrc`, so the extension process itself has no proxy vars even when
+your interactive terminals do. Reading them in the terminal is what makes it work
+there. (Consequence: if your proxy only reaches the container over a specific
+address — e.g. `host.docker.internal` instead of `localhost` — set the proxy var
+to that address; rockDemo forwards the value verbatim and does not rewrite it.)
+
+To make some destinations **bypass** the proxy inside the containers, set
+`noProxy` at the backend level — either `backendExtended.noProxy` in your
+scenario or `noProxy` on a `backends.json` profile. It accepts an array or a
+comma-separated string of IPs, CIDRs, or hostnames, and is appended after the
+shell's `NO_PROXY`. Every node's **name and alias** is also appended
+automatically, so node-to-node traffic by hostname always bypasses the proxy:
+
+```json
+"backendExtended": {
+  "noProxy": ["10.0.0.0/8", "registry.internal"],
+  "nodes": [ … ]
+}
+```
+
+The bundled **Kubernetes** profiles (`kubernetes-kubeadm-1node`,
+`kubernetes-kubeadm-2nodes`) set `noProxy` to the pod CIDR (`10.244.0.0/16`), the
+service CIDR (`10.96.0.0/12`), the node network (`172.30.0.0/16`), and
+`localhost`/`127.0.0.1` so cluster-internal traffic never goes through the proxy
+(routing pod/service/apiserver traffic through a proxy would otherwise break the
+cluster).
+
+#### System daemons (containerd / dockerd) and CA trust
+
+Forwarding the proxy env is enough for shell tools (`curl`, `git`, …), but the
+in-container **daemons need two more things**, both handled automatically on the
+**systemd** images (`ubuntu-systemd` and the `kubernetes-kubeadm-*` images built
+on it):
+
+- **The daemons don't inherit the container env.** `containerd`/`dockerd` run as
+  systemd units, which systemd starts with a clean environment — so the
+  `docker run -e` proxy never reaches them. A boot oneshot
+  ([rockdemo-proxy.service](docker/ubuntu-systemd/rockdemo-proxy.service)) lifts
+  the proxy out of PID 1's environment into `/run/rockdemo/proxy.env`, which
+  baked `EnvironmentFile=` drop-ins hand to both daemons before they start.
+- **TLS-intercepting proxies.** A corporate proxy that re-signs TLS with an
+  internal CA breaks image pulls (the container doesn't trust that CA). rockDemo
+  bind-mounts the **host's CA bundle** (`/etc/ssl/certs/ca-certificates.crt` or
+  the RHEL/OpenSSL equivalent) into every node at `/etc/rockdemo-host-ca.crt`,
+  and the same boot oneshot merges it into the container trust store
+  (`update-ca-certificates`). So the container trusts exactly what the host does.
+  The proxy value is forwarded **verbatim** — if the container reaches the proxy
+  at a different address than the host (e.g. `host.docker.internal` vs
+  `localhost`), set the proxy variable to that address.
+
+Because this lives in the images, it applies to the **bundled systemd images**;
+a rebuild/republish of those images is required for changes to take effect, and
+custom (`backendExtended`) images that don't inherit `ubuntu-systemd` get the
+forwarded env + mounted CA but must wire up their own daemon/trust integration.
 
 ### Custom images
 
