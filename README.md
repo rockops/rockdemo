@@ -94,8 +94,14 @@ scenario ends.
 ### Terminal placement
 
 By default node terminals open in the **editor area, to the right of the
-instructions** — the scenario stays visible in its own column, and each node
-gets its own pane. A node's **`split`** controls how its pane is placed:
+instructions** (vertical layout) — the scenario stays visible in its own column, and each node
+gets its own pane.
+
+You can configure the overall layout orientation via the **`rockdemo.scenarioLayout`** setting in VS Code:
+* `"vertical"` (default): Places scenario instructions on the left and terminals on the right.
+* `"horizontal"`: Places scenario instructions on the top and all terminals on the bottom.
+
+Within the terminal area, a node's **`split`** controls how its pane is placed:
 `"right"` (or `true`) puts it **beside** the previous node, `"down"` **stacks it
 below** — so you can build side-by-side or grid layouts. The layout reverts
 automatically when the scenario ends.

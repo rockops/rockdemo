@@ -729,17 +729,34 @@ function startNodes(entry) {
       idx++;
       return rec;
     });
-  // Editor mode: the panes opened as a flat row of columns. If any column has
-  // more than one node (a "down" split), reshape the editor grid so those nodes
-  // stack vertically. Root orientation is horizontal (columns); a nested `groups`
-  // flips to vertical (rows) — exactly the two-level column/row grid we tracked.
-  // The first group is the webview's own column (leftmost); the rest are the node
-  // columns in order, matching the viewColumns assigned above.
-  if (columns.some((c) => c.length > 1)) {
-    const gridLayout = {
-      orientation: 0,
-      groups: [{}, ...columns.map((c) => (c.length > 1 ? { groups: c.map(() => ({})) } : {}))],
-    };
+  // Editor mode: the panes opened as a flat row of columns. Reshape the editor grid
+  // according to the configured scenario layout and terminal splits.
+  if (entry.terminals.length > 0) {
+    const layoutPref = vscode.workspace.getConfiguration("rockdemo").get("scenarioLayout", "vertical");
+    let gridLayout;
+    const termGroups = columns.map((c) => (c.length > 1 ? { groups: c.map(() => ({})) } : {}));
+
+    if (layoutPref === "horizontal") {
+      gridLayout = {
+        orientation: 1, // vertical flow (rows)
+        groups: [
+          {}, // Webview (top)
+          {
+            orientation: 0, // horizontal flow (columns)
+            groups: termGroups
+          } // Terminals (bottom)
+        ]
+      };
+    } else {
+      // Default: "vertical" (left instructions, right terminals)
+      gridLayout = {
+        orientation: 0, // horizontal flow (columns)
+        groups: [
+          {}, // Webview (left)
+          ...termGroups
+        ]
+      };
+    }
     setTimeout(() => vscode.commands.executeCommand("vscode.setEditorLayout", gridLayout), 0);
   }
   // Where focus lands once everything has opened. VS Code makes the

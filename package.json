@@ -49,6 +49,15 @@
           "type": "boolean",
           "default": true,
           "description": "Restore the agent panel (Auxiliary Bar) when exiting demo mode or ending a scenario."
+        },
+        "rockdemo.scenarioLayout": {
+          "type": "string",
+          "enum": [
+            "vertical",
+            "horizontal"
+          ],
+          "default": "vertical",
+          "description": "The layout orientation of the scenario instructions and node terminals. 'vertical' places instructions on the left and terminals on the right; 'horizontal' places instructions on the top and terminals on the bottom."
         }
       }
     },
