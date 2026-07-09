@@ -101,13 +101,16 @@ screen (it doesn't depend on the intro):
 - **🖥 DEMO MODE** — toggles **projection mode** on/off at any time. In DEMO mode
   the player and the node terminals switch to a **projector-friendly look**: a
   forced light, high-contrast theme with larger fonts, regardless of your VS Code
-  theme.
+  theme. It also **collapses the file-explorer side bar and the bottom panel** so
+  only the scenario and its terminals remain visible.
 - **A− / A+** — adjust the font size of the player (and, in DEMO mode, the node
   terminals) in 2px steps.
 
-These are purely visual; the terminal-styling overrides are temporary and are
-reverted when you leave DEMO mode or close the scenario. Both the mode and the
-chosen font size persist across **RESTART**.
+These are purely visual; the terminal-styling and layout overrides are temporary
+and are reverted when you leave DEMO mode or close the scenario (the side bar and
+bottom panel are re-revealed). Because VS Code exposes no API to read their prior
+visibility, they are always re-shown on exit even if you had them hidden before.
+Both the mode and the chosen font size persist across **RESTART**.
 2. On open, rockDemo starts an interactive shell in a Docker container for each
    node. **Docker is a prerequisite.** `{{exec}}` commands run *inside* the
    active node's container.
@@ -198,12 +201,12 @@ prompts for the node rather than one entry per live node.)*
   order defines the implicit positional aliases `host1`/`host01`, `host2`/
   `host02`, … (a legacy `{ name: {…} }` map is still accepted, but a map has no
   guaranteed order — prefer the list).
-- `backendExtended.layout` — optional terminal layout for the node terminals:
-  `"stacked"` (default) opens each node as its own panel **tab**; `"split"` opens
-  every node after the first **side-by-side** in one panel group. It's a
-  shorthand for setting `split` on every node but the first — for fine-grained
-  grouping (some tabbed, some split), omit `layout` and set the per-node `split`
-  flag instead. A `backends.json` profile may carry `layout` too.
+- `backendExtended.layout` — optional default `split` for every node after the
+  first: `"columns"` (or the legacy `"split"`) → `"right"` (side-by-side);
+  `"rows"` → `"down"` (stacked); omit it (the default) for no split. It's a
+  shorthand — for a mixed layout, omit `layout` and set the per-node `split`
+  direction instead (see the table below). A `backends.json` profile may carry
+  `layout` too.
 - `backendExtended.noProxy` — optional list of IPs, CIDRs, or hostnames that
   should **bypass** the host proxy inside the containers (see
   [Proxy forwarding](#proxy-forwarding)). Accepts an array
@@ -220,7 +223,7 @@ prompts for the node rather than one entry per live node.)*
 | `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
 | `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
-| `split` | Optional. `true` → open this node's terminal **side-by-side** with the previous node's (in the same panel group) instead of as its own stacked tab. A node without `split` starts a fresh group; following `split` nodes join it — so groups are formed by runs of `split` nodes. The first node is always a new tab (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets this on every node but the first. |
+| `split` | Optional. Splits this node's terminal from the previous node's into its own **pane**. Accepts a direction: `"right"` (a pane **beside**, side-by-side) or `"down"` (a pane **stacked below**). `true` means `"right"`. A node without `split` opens beside as a new column too — the difference is that a `"down"` node stacks under whichever column is current. The first node never splits (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets a default for every node but the first: `"split"`/`"columns"` → `"right"`, `"rows"` → `"down"`. The panes open in the editor area and form a real grid shaped by this direction. |
 | `background` | Optional. A **script file** (path relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
 | `foreground` | Optional. A **script file** (path relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
 
@@ -389,7 +392,7 @@ the same shape as a `backendExtended` block:
 `nodes` is an **ordered list** (the order sets the implicit `host1`/`host2` …
 positional aliases). A multi-node profile such as `kubernetes-kubeadm-2nodes`
 just lists more entries. A profile may also set `layout` (or per-node `split`) to
-open its terminals side-by-side instead of as stacked tabs.
+arrange its terminals into side-by-side or stacked panes.
 
 A profile node may also carry `background`/`foreground` **script files** that run
 automatically when the env starts (see the per-node fields table above). The

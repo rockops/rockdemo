@@ -57,13 +57,17 @@ The player has a small control cluster pinned to the **top-right** on every
 screen:
 
 - **A− / A+** — resize the player *and* terminal fonts together for readability.
-- **🖥 DEMO MODE** — toggle **projection mode**: a light, high-contrast theme with
-  larger fonts, forced on *both* the player and the node terminals regardless of
-  your VS Code theme, so a scenario reads well on a projector or shared screen.
-  Click again (**🖥 EXIT DEMO MODE**) to return to your normal look.
+- **🖥 DEMO MODE** — toggle **projection mode**: a light, high-contrast look with
+  larger fonts, forced on the player, the node terminals, **and the editor**
+  (it temporarily switches VS Code to your **`workbench.preferredLightColorTheme`**
+  so files opened via an **Open** button read well too). It also **collapses the
+  file-explorer side bar and the bottom panel**, so all that's left on screen is
+  the scenario and its terminals — ideal for a projector or shared screen. Click
+  again (**🖥 EXIT DEMO MODE**) to return to your normal look.
 
 Both settings persist across **RESTART** and reloads. Exiting DEMO mode — or
-stopping the scenario — restores your original terminal colors and font size.
+stopping the scenario — restores your original color theme, terminal colors, and
+font size, and re-reveals the side bar and panel.
 
 ### Extra terminals on a node
 
@@ -78,6 +82,15 @@ With a single node the terminal opens on it immediately; with several, you pick
 which node. Each opens a fresh shell on the running container using that node's
 configured shell (falling back to `sh`), and closes automatically when the
 scenario ends.
+
+### Terminal placement
+
+By default node terminals open in the **editor area, to the right of the
+instructions** — the scenario stays visible in its own column, and each node
+gets its own pane. A node's **`split`** controls how its pane is placed:
+`"right"` (or `true`) puts it **beside** the previous node, `"down"` **stacks it
+below** — so you can build side-by-side or grid layouts. The layout reverts
+automatically when the scenario ends.
 
 ### Try it
 

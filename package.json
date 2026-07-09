@@ -104,6 +104,18 @@
           "command": "rockdemo.stopAndClearCache",
           "when": "rockdemo.scenarioRunning",
           "group": "1_rockdemo@1"
+        },
+        {
+          "command": "rockdemo.newNodeTerminal",
+          "when": "activeEditor == 'terminalEditor' && rockdemo.scenarioRunning",
+          "group": "navigation@-1"
+        }
+      ],
+      "terminal/title/context": [
+        {
+          "command": "rockdemo.newNodeTerminal",
+          "when": "rockdemo.scenarioRunning",
+          "group": "navigation@1"
         }
       ],
       "commandPalette": [
