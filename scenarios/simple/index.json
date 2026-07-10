@@ -1,65 +1,77 @@
 {
-    "title": "Découverte de kubectl",
-    "description": "Mes premiers pas avec kubectl",
-    "details": {
-      "intro": {
-        "text": "intro.md",
-        "background": "background.sh",
+  "title": "Découverte de kubectl",
+  "description": "Mes premiers pas avec kubectl",
+  "details": {
+    "intro": {
+      "text": "intro.md",
+      "background": "background.sh",
+      "foreground": "foreground.sh",
+      "host": "host2"
+    },
+    "steps": [
+      {
+        "title": "Premieres commandes",
+        "text": "step1/step1.md",
+        "background": "sh background.sh",
+        "foreground": "sh foreground.sh",
+        "host": "host1",
+        "verify": "step1/verify.sh"
+      },
+      {
+        "title": "Création d'une ressource",
+        "text": "step2/step2.md",
         "foreground": "foreground.sh",
-        "host": "host2"
-      },
-      "steps": [
-        {
-          "title": "Premieres commandes",
-          "text": "step1/step1.md",
-          "background": "sh background.sh",
-          "foreground": "sh foreground.sh",
-          "host": "host1",
-          "verify": "step1/verify.sh"
-        },
-        {
-          "title": "Création d'une ressource",
-          "text": "step2/step2.md",
-          "foreground": "foreground.sh",
-          "host": "host2",
-          "verify": "step2/verify.sh"
-        }
-      ],
-      "assets": {
-        "host1": [
-          {"file": "solution*/**", "target": "/var/killercoda/solution","chmod":"+w"},
-          {"file": "solution*/**", "target": "/var/killercoda/solution_copy","chmod":"+w"},
-          {"file": "solution1/first.txt", "target": "/var/killercoda/solution_copy2","chmod":"+w"}
-        ]
-      },
-      "finish": {
-        "text": "finish.md"
+        "host": "host2",
+        "verify": "step2/verify.sh"
       }
-
-    },
-    "backend": {
-      "imageid": "alpine"
-    },
-    "backendExtended": {
-      "nodes": [
+    ],
+    "assets": {
+      "host1": [
         {
-            "name": "host1",
-            "imageid": "alpine",
-            "cmd": "sh",
-            "ip": "172.30.1.2"
+          "file": "solution*/**",
+          "target": "/var/killercoda/solution",
+          "chmod": "+w"
         },
         {
-            "name": "host2",
-            "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04",
-            "cmd": "bash",
-            "ip": "172.30.2.2"
+          "file": "solution*/**",
+          "target": "/var/killercoda/solution_copy",
+          "chmod": "+w"
         },
         {
-            "name": "host3", "split": "down",
-            "imageid": "alpine",
-            "cmd": "sh",
-            "ip": "172.30.3.2"
+          "file": "solution1/first.txt",
+          "target": "/var/killercoda/solution_copy2",
+          "chmod": "+w"
         }
       ]
+    },
+    "finish": {
+      "text": "finish.md"
     }
+  },
+  "backend": {
+    "imageid": "alpine"
+  },
+  "backendExtended": {
+    "nodes": [
+      {
+        "name": "host1",
+        "imageid": "alpine",
+        "cmd": "sh",
+        "ip": "172.30.1.2"
+      },
+      {
+        "name": "host2",
+        "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04",
+        "cmd": "bash",
+        "ip": "172.30.2.2",
+        "split": "down"
+      },
+      {
+        "name": "host3",
+        "imageid": "alpine",
+        "cmd": "sh",
+        "ip": "172.30.3.2"
+      }
+    ]
+  }
 }

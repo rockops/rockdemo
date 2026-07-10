@@ -58,6 +58,11 @@
           ],
           "default": "vertical",
           "description": "The layout orientation of the scenario instructions and node terminals. 'vertical' places instructions on the left and terminals on the right; 'horizontal' places instructions on the top and terminals on the bottom."
+        },
+        "rockdemo.clearTerminalOnReady": {
+          "type": "boolean",
+          "default": true,
+          "description": "Clear the terminal window to start clean when the shell is available and all startup/foreground scripts have finished."
         }
       }
     },

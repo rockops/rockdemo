@@ -77,6 +77,12 @@ By default, exiting DEMO mode or closing the scenario re-reveals all three UI pa
 * `rockdemo.restorePanel` (default `true`): Restore the bottom panel (Terminal) when exiting demo mode or ending a scenario.
 * `rockdemo.restoreAgentPanel` (default `true`): Restore the agent panel (Auxiliary Bar/Secondary Sidebar) when exiting demo mode or ending a scenario.
 
+### Terminal Startup Settings
+
+By default, each node terminal is cleared once it is ready (meaning the shell is available and any background/foreground configuration scripts have finished executing) to start with a clean workspace. You can customize this behavior:
+
+* `rockdemo.clearTerminalOnReady` (default `true`): Clear the terminal window to start clean when the shell is available and all startup/foreground scripts have finished. Set to `false` to preserve the command output and logs of the container startup in the terminal buffer.
+
 ### Extra terminals on a node
 
 Need a second shell on a node — e.g. to tail logs while you type commands in the
