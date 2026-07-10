@@ -21,9 +21,22 @@ let extensionUri = null;
  * @returns {{ present: boolean, action: string|undefined, interrupt: boolean }}
  */
 function parseAnnotation(raw) {
-  if (raw === undefined) return { present: false, action: undefined, interrupt: false };
+  if (raw === undefined) return { present: false, action: undefined, interrupt: false, background: undefined };
   const parts = raw.trim().split(/\s+/).filter(Boolean);
-  return { present: true, action: parts[0], interrupt: parts.includes("interrupt") };
+  let action = parts[0];
+  let interrupt = false;
+  let background = undefined;
+  for (const part of parts) {
+    if (part === "interrupt") {
+      interrupt = true;
+    } else if (part.startsWith("background=")) {
+      background = part.split("=")[1];
+    }
+  }
+  if (action && (action.startsWith("background=") || action === "interrupt")) {
+    action = undefined;
+  }
+  return { present: true, action, interrupt, background };
 }
 
 /**
@@ -72,13 +85,13 @@ function parseScenario(document) {
 
       const ann = parseAnnotation(close[1]);
       let action = ann.action; // exec | copy | open | undefined ({{}} disables)
-      if (!ann.present && ["bash", "sh", "shell"].includes(lang)) {
+      if (!action && ["bash", "sh", "shell"].includes(lang) && close[1] !== "") {
         action = "exec";
       }
 
       const body = content.join("\n");
       if (action && body.trim().length > 0) {
-        blocks.push({ openLine, action, lang, content: body, interrupt: ann.interrupt });
+        blocks.push({ openLine, action, lang, content: body, interrupt: ann.interrupt, background: ann.background });
       }
       continue;
     }
@@ -112,6 +125,9 @@ function runExec(cmd, opts) {
   const term =
     vscode.window.activeTerminal || vscode.window.createTerminal("rockDemo");
   term.show();
+  if (opts && opts.background) {
+    applyTerminalBackground(opts.background);
+  }
   if (opts && opts.interrupt) sendInterruptThen(term, cmd);
   // `true` appends a newline — i.e. types the command AND presses Enter.
   else term.sendText(cmd, true);
@@ -998,6 +1014,7 @@ function firstNodeImage(entry) {
 // The rockDemo webview panel (demo or scenario) currently focused, if any.
 // Drives the title-bar Stop button for the markdown demo and rockdemo.stop.
 let activeDemoPanel = null;
+let activeDemoEntry = null;
 
 // The running scenario player, if any. Only one scenario may run at a time:
 // while set, the `rockdemo.scenarioRunning` context key is true, which hides
@@ -1020,13 +1037,50 @@ function setScenarioRunning(panel) {
 /** Track a panel as the active demo window, clearing the ref when it closes. */
 function trackActivePanel(panel) {
   activeDemoPanel = panel;
+  if (panel.entry && !panel.entry.nodes) {
+    activeDemoEntry = panel.entry;
+  }
   panel.onDidChangeViewState((e) => {
-    if (e.webviewPanel.active) activeDemoPanel = e.webviewPanel;
-    else if (activeDemoPanel === e.webviewPanel) activeDemoPanel = null;
+    if (e.webviewPanel.active) {
+      activeDemoPanel = e.webviewPanel;
+      if (e.webviewPanel.entry && !e.webviewPanel.entry.nodes) {
+        activeDemoEntry = e.webviewPanel.entry;
+      }
+    }
+    else if (activeDemoPanel === e.webviewPanel) {
+      activeDemoPanel = null;
+      if (activeDemoEntry === e.webviewPanel.entry) activeDemoEntry = null;
+    }
   });
   panel.onDidDispose(() => {
     if (activeDemoPanel === panel) activeDemoPanel = null;
+    if (activeDemoEntry === panel.entry) activeDemoEntry = null;
   });
+}
+
+function isDemoModeActive() {
+  if (runningScenarioEntry && runningScenarioEntry.demoTermApplied) return true;
+  if (activeDemoEntry && activeDemoEntry.demoTermApplied) return true;
+  return false;
+}
+
+async function applyTerminalBackground(color) {
+  if (!isDemoModeActive()) return;
+  if (!color) return;
+  try {
+    const cfg = vscode.workspace.getConfiguration();
+    const T = vscode.ConfigurationTarget.Workspace;
+    const current = cfg.get("workbench.colorCustomizations") || {};
+    const updated = { ...current };
+    if (color === "default") {
+      delete updated["terminal.background"];
+    } else {
+      updated["terminal.background"] = color;
+    }
+    await cfg.update("workbench.colorCustomizations", updated, T);
+  } catch (err) {
+    // ignore
+  }
 }
 
 const RUN_DIR = ".rockdemo-run"; // gitignored scratch root inside a scenario
@@ -1818,6 +1872,9 @@ function mapContainerPath(entry, containerPath) {
  * would keep whatever state the previous run left them in.)
  */
 function restartScenario(entry) {
+  if (entry.demoTermApplied) {
+    applyTerminalBackground("default");
+  }
   disposeEntryTerminals(entry);
   entry.startPromise = startNodes(entry);
   buildScenario(entry.doc, entry.nodes).then((data) => {
@@ -1850,7 +1907,7 @@ class ScenarioCodeLensProvider {
           new vscode.CodeLens(range, {
             title: block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal",
             command: "rockdemo.exec",
-            arguments: [block.content, { interrupt: !!block.interrupt }],
+            arguments: [block.content, { interrupt: !!block.interrupt, background: block.background }],
           })
         );
         lenses.push(
@@ -1967,15 +2024,19 @@ function isHtmlBlockLine(line) {
  */
 function inlineCodeHtml(code, anno) {
   const ann = parseAnnotation(anno);
-  const action = ann.present ? ann.action : "copy"; // default: copyable
+  let action = ann.present ? ann.action : "copy"; // default: copyable
+  if (!action && ann.background) {
+    action = "exec";
+  }
   const codeHtml = `<code>${escapeHtml(code)}</code>`;
   const cmd = encodeURIComponent(code);
   if (action === "exec") {
     const intr = ann.interrupt ? ` data-interrupt="1"` : "";
+    const bgAttr = ann.background ? ` data-background="${escapeHtml(ann.background)}"` : "";
     const title = ann.interrupt ? "Run (Ctrl+C first)" : "Run in terminal";
     return (
       codeHtml +
-      `<button class="inline-act" title="${title}" data-action="exec" data-cmd="${cmd}"${intr}>▶</button>` +
+      `<button class="inline-act" title="${title}" data-action="exec" data-cmd="${cmd}"${intr}${bgAttr}>▶</button>` +
       `<button class="inline-act" title="Copy" data-action="copy" data-cmd="${cmd}">📋</button>`
     );
   }
@@ -2050,11 +2111,12 @@ function blockButtons(block, baseStr) {
   const cmd = encodeURIComponent(block.content);
   if (block.action === "exec") {
     const intr = block.interrupt ? ` data-interrupt="1"` : "";
+    const bgAttr = block.background ? ` data-background="${escapeHtml(block.background)}"` : "";
     const runLabel = block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal";
     return (
       `<pre class="demo-cmd"><code>${escapeHtml(block.content)}</code></pre>` +
       `<div class="demo-actions">` +
-      `<button data-action="exec" data-cmd="${cmd}"${intr}>${runLabel}</button>` +
+      `<button data-action="exec" data-cmd="${cmd}"${intr}${bgAttr}>${runLabel}</button>` +
       `<button data-action="copy" data-cmd="${cmd}">📋 Copy</button>` +
       `</div>`
     );
@@ -2401,6 +2463,7 @@ const CLIENT_SCRIPT = `
       file: btn.dataset.file ? decodeURIComponent(btn.dataset.file) : undefined,
       base: btn.dataset.base ? decodeURIComponent(btn.dataset.base) : undefined,
       interrupt: btn.dataset.interrupt === "1",
+      background: btn.dataset.background || undefined,
     });
   });
   // Verification result from the extension: reveal NEXT on success, or flash
@@ -2744,7 +2807,7 @@ function demoHtml(document, webview) {
  * directs subsequent commands there), else the first node. Demo mode creates a
  * single terminal lazily on first use.
  */
-function sendToEntryTerminal(entry, cmd, interrupt) {
+function sendToEntryTerminal(entry, cmd, interrupt, background) {
   if (!entry.terminals || entry.terminals.length === 0) {
     entry.terminals = [
       { name: "rockDemo", terminal: vscode.window.createTerminal("rockDemo"), containerName: null },
@@ -2754,6 +2817,9 @@ function sendToEntryTerminal(entry, cmd, interrupt) {
   const rec =
     entry.terminals.find((r) => r.terminal === active) || entry.terminals[0];
   rec.terminal.show();
+  if (background && entry.demoTermApplied) {
+    applyTerminalBackground(background);
+  }
   // With {{exec interrupt}}, Ctrl+C first to stop any running foreground process.
   if (interrupt) sendInterruptThen(rec.terminal, cmd);
   // `true` appends a newline — i.e. types the command AND presses Enter.
@@ -2880,7 +2946,7 @@ function makeMessageHandler(entry) {
     if (!skipWait && entry.startPromise) {
       await entry.startPromise;
     }
-    if (msg.action === "exec") sendToEntryTerminal(entry, msg.cmd, msg.interrupt);
+    if (msg.action === "exec") sendToEntryTerminal(entry, msg.cmd, msg.interrupt, msg.background);
     else if (msg.action === "copy") runCopy(msg.cmd);
     else if (msg.action === "open") {
       // A container-absolute path opens the host copy bind-mounted there;
@@ -2946,6 +3012,7 @@ function openDemoPanel(document, panels) {
       }
     );
     entry = { panel, terminals: [] };
+    panel.entry = entry;
     panels.set(key, entry);
     trackActivePanel(panel);
     panel.webview.onDidReceiveMessage(makeMessageHandler(entry));
@@ -2953,6 +3020,7 @@ function openDemoPanel(document, panels) {
     panel.onDidDispose(() => {
       disposeEntryTerminals(entry);
       panels.delete(key);
+      if (activeDemoEntry === entry) activeDemoEntry = null;
     });
   }
 
@@ -3193,6 +3261,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       fgDone: new Set(),
       startPromise: null,
     };
+    panel.entry = entry;
     scenarioPanels.set(key, entry);
     trackActivePanel(panel);
     runningScenarioEntry = entry; // target for "new terminal on node"
