@@ -755,16 +755,23 @@ async function startNodes(entry) {
     const termGroups = columns.map((c) => (c.length > 1 ? { orientation: 1, groups: c.map(() => ({})) } : {}));
 
     if (layoutPref === "horizontal") {
-      gridLayout = {
-        orientation: 1, // vertical flow (rows)
-        groups: [
-          {}, // Webview (top)
-          {
-            orientation: 0, // horizontal flow (columns)
-            groups: termGroups
-          } // Terminals (bottom)
-        ]
-      };
+      if (columns.length === 1) {
+        gridLayout = {
+          orientation: 1, // vertical flow (rows)
+          groups: Array.from({ length: 1 + columns[0].length }, () => ({}))
+        };
+      } else {
+        gridLayout = {
+          orientation: 1, // vertical flow (rows)
+          groups: [
+            {}, // Webview (top)
+            {
+              orientation: 0, // horizontal flow (columns)
+              groups: termGroups
+            } // Terminals (bottom)
+          ]
+        };
+      }
     } else {
       // Default: "vertical" (left instructions, right terminals)
       gridLayout = {

@@ -63,14 +63,14 @@
         "name": "host2",
         "imageid": "ghcr.io/rockops/rockdemo/ubuntu:24.04",
         "cmd": "bash",
-        "ip": "172.30.2.2",
-        "split": "down"
+        "ip": "172.30.2.2"
       },
       {
         "name": "host3",
         "imageid": "alpine",
         "cmd": "sh",
-        "ip": "172.30.3.2"
+        "ip": "172.30.3.2",
+        "split": "down"
       }
     ]
   }
