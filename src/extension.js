@@ -3232,6 +3232,76 @@ function isScenarioDoc(doc) {
   return (doc.uri.path.split("/").pop() || "") === "index.json";
 }
 
+/** Resolve all image IDs used by the nodes of a scenario. */
+function getScenarioImages(scenario) {
+  try {
+    const nodes = resolveNodes(scenario);
+    return nodes.map(n => n.imageid).filter(Boolean);
+  } catch (err) {
+    return [];
+  }
+}
+
+/** Collect backend images to clear, scanning workspace config and scenarios if needed. */
+async function getImagesToClear(entry) {
+  const images = new Set();
+
+  // 1. If entry is provided, get images from it
+  if (entry && entry.scenario) {
+    getScenarioImages(entry.scenario).forEach(img => images.add(img));
+  }
+
+  // 2. If runningScenarioEntry is active, get images from it
+  if (runningScenarioEntry && runningScenarioEntry.scenario) {
+    getScenarioImages(runningScenarioEntry.scenario).forEach(img => images.add(img));
+  }
+
+  // 3. If there's an active scenario document in the editor
+  const editor = vscode.window.activeTextEditor;
+  if (editor && isScenarioDoc(editor.document)) {
+    try {
+      const scenario = JSON.parse(editor.document.getText());
+      getScenarioImages(scenario).forEach(img => images.add(img));
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  // 4. Also scan all workspace index.json files to be thorough
+  try {
+    const uris = await vscode.workspace.findFiles("**/index.json");
+    for (const uri of uris) {
+      try {
+        const content = await readText(uri);
+        const scenario = JSON.parse(content);
+        getScenarioImages(scenario).forEach(img => images.add(img));
+      } catch (err) {
+        // ignore
+      }
+    }
+  } catch (err) {
+    // ignore
+  }
+
+  // 5. Also load all default backends from config/backends.json
+  try {
+    const backends = loadBackends();
+    for (const key of Object.keys(backends)) {
+      const profile = backends[key];
+      if (profile && profile.nodes) {
+        const nodes = nodesFromConfig(profile.nodes, profile.layout);
+        for (const n of nodes) {
+          if (n.imageid) images.add(n.imageid);
+        }
+      }
+    }
+  } catch (err) {
+    // ignore
+  }
+
+  return [...images];
+}
+
 /**
  * Sweep stale rockDemo Docker resources left by a previous session (e.g. VS Code
  * was closed without stopping the scenario). Scoped strictly to the rockdemo
@@ -3265,7 +3335,7 @@ async function cleanupStaleResources() {
  * (with a 1s pause), which lets a caller fire an async container teardown and
  * then clear the volumes it frees. Returns { removed, inUse }.
  */
-async function clearCacheVolumes({ retries = 0 } = {}) {
+async function clearCacheVolumes({ retries = 0, images = [] } = {}) {
   const list = async () => {
     try {
       const { stdout } = await execFile("docker", [
@@ -3295,7 +3365,21 @@ async function clearCacheVolumes({ retries = 0 } = {}) {
     if (inUse === 0 || attempt >= retries) break;
     await delay(1000); // give an in-flight `docker rm -f` time to release them
   }
-  return { removed, inUse };
+
+  let removedImages = 0;
+  if (images && images.length) {
+    const uniqueImages = [...new Set(images)];
+    for (const image of uniqueImages) {
+      try {
+        await execFile("docker", ["rmi", image]);
+        removedImages++;
+      } catch (err) {
+        // ignore errors (image not found, in use, etc.)
+      }
+    }
+  }
+
+  return { removed, inUse, removedImages };
 }
 
 /**
@@ -3304,18 +3388,23 @@ async function clearCacheVolumes({ retries = 0 } = {}) {
  * so remove the containers FIRST (awaited) before deleting the now-free volumes.
  */
 async function endAndClearCache(entry) {
+  const images = await getImagesToClear(entry);
   await removeEntryContainers(entry); // frees the volumes this scenario holds
   if (entry.panel) entry.panel.dispose(); // map cleanup + reset scenarioRunning
-  notifyCacheCleared(await clearCacheVolumes());
+  notifyCacheCleared(await clearCacheVolumes({ images }));
 }
 
 /** Report a clearCacheVolumes() result to the user. */
-function notifyCacheCleared({ removed, inUse }) {
-  if (!removed && !inUse) {
-    vscode.window.showInformationMessage("rockDemo: no image cache to clear.");
+function notifyCacheCleared({ removed, inUse, removedImages = 0 }) {
+  if (!removed && !inUse && !removedImages) {
+    vscode.window.showInformationMessage("rockDemo: no image cache or backend images to clear.");
     return;
   }
-  let m = `rockDemo: cleared ${removed} image cache volume${removed === 1 ? "" : "s"}.`;
+  let m = `rockDemo: cleared ${removed} image cache volume${removed === 1 ? "" : "s"}`;
+  if (removedImages > 0) {
+    m += ` and ${removedImages} backend image${removedImages === 1 ? "" : "s"}`;
+  }
+  m += ".";
   if (inUse) {
     m += ` ${inUse} still in use — stop the scenario using them, then clear again.`;
   }
@@ -3460,7 +3549,8 @@ function activate(context) {
   // are skipped and reported.
   context.subscriptions.push(
     vscode.commands.registerCommand("rockdemo.clearCache", async () => {
-      notifyCacheCleared(await clearCacheVolumes());
+      const images = await getImagesToClear();
+      notifyCacheCleared(await clearCacheVolumes({ images }));
     })
   );
 
@@ -3508,9 +3598,11 @@ function activate(context) {
   // volume removal until those in-flight `docker rm`s release them.
   context.subscriptions.push(
     vscode.commands.registerCommand("rockdemo.stopAndClearCache", async () => {
+      const entry = runningScenarioEntry;
+      const images = await getImagesToClear(entry);
       const target = runningScenarioPanel || activeDemoPanel;
       if (target) target.dispose();
-      notifyCacheCleared(await clearCacheVolumes({ retries: 8 }));
+      notifyCacheCleared(await clearCacheVolumes({ retries: 8, images }));
     })
   );
 
