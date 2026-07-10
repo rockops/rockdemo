@@ -1819,7 +1819,7 @@ function mapContainerPath(entry, containerPath) {
  */
 function restartScenario(entry) {
   disposeEntryTerminals(entry);
-  startNodes(entry);
+  entry.startPromise = startNodes(entry);
   buildScenario(entry.doc, entry.nodes).then((data) => {
     if (!entry.disposed) {
       // VS Code ignores `webview.html = x` when `x` is byte-identical to the
@@ -2875,7 +2875,11 @@ async function restoreDemoTerminalStyle(entry) {
  * each "execution window" runs commands in (and owns) its own terminal.
  */
 function makeMessageHandler(entry) {
-  return (msg) => {
+  return async (msg) => {
+    const skipWait = ["close", "closeClear", "restart"].includes(msg.nav);
+    if (!skipWait && entry.startPromise) {
+      await entry.startPromise;
+    }
     if (msg.action === "exec") sendToEntryTerminal(entry, msg.cmd, msg.interrupt);
     else if (msg.action === "copy") runCopy(msg.cmd);
     else if (msg.action === "open") {
@@ -3187,6 +3191,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       terminals: [],
       bgDone: new Set(),
       fgDone: new Set(),
+      startPromise: null,
     };
     scenarioPanels.set(key, entry);
     trackActivePanel(panel);
@@ -3210,7 +3215,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
     // so the terminals are ready while the user reads the intro and clicks
     // START.
     if (nodes.length) {
-      startNodes(entry);
+      entry.startPromise = startNodes(entry);
     } else {
       vscode.window.showWarningMessage(
         "rockDemo: scenario has no backend / backendExtended.nodes — no container started"
