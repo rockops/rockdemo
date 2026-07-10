@@ -67,7 +67,21 @@ screen:
 
 Both settings persist across **RESTART** and reloads. Exiting DEMO mode — or
 stopping the scenario — restores your original color theme, terminal colors, and
-font size, and re-reveals the side bar and panel.
+font size, and re-reveals the side bar and panels.
+
+### Panel Restoration Settings
+
+By default, exiting DEMO mode or closing the scenario re-reveals all three UI panels (the File Explorer Sidebar, the bottom Terminal panel, and the Agent Panel / Auxiliary Bar). If you prefer some of these panels to remain hidden when exiting, you can customize this in your VS Code settings under `rockDemo`:
+
+* `rockdemo.restoreSidebar` (default `true`): Restore the primary sidebar (Explorer) when exiting demo mode or ending a scenario.
+* `rockdemo.restorePanel` (default `true`): Restore the bottom panel (Terminal) when exiting demo mode or ending a scenario.
+* `rockdemo.restoreAgentPanel` (default `true`): Restore the agent panel (Auxiliary Bar/Secondary Sidebar) when exiting demo mode or ending a scenario.
+
+### Terminal Startup Settings
+
+By default, each node terminal is cleared once it is ready (meaning the shell is available and any background/foreground configuration scripts have finished executing) to start with a clean workspace. You can customize this behavior:
+
+* `rockdemo.clearTerminalOnReady` (default `true`): Clear the terminal window to start clean when the shell is available and all startup/foreground scripts have finished. Set to `false` to preserve the command output and logs of the container startup in the terminal buffer.
 
 ### Extra terminals on a node
 
@@ -86,8 +100,14 @@ scenario ends.
 ### Terminal placement
 
 By default node terminals open in the **editor area, to the right of the
-instructions** — the scenario stays visible in its own column, and each node
-gets its own pane. A node's **`split`** controls how its pane is placed:
+instructions** (vertical layout) — the scenario stays visible in its own column, and each node
+gets its own pane.
+
+You can configure the overall layout orientation via the **`rockdemo.scenarioLayout`** setting in VS Code:
+* `"vertical"` (default): Places scenario instructions on the left and terminals on the right.
+* `"horizontal"`: Places scenario instructions on the top and all terminals on the bottom.
+
+Within the terminal area, a node's **`split`** controls how its pane is placed:
 `"right"` (or `true`) puts it **beside** the previous node, `"down"` **stacks it
 below** — so you can build side-by-side or grid layouts. The layout reverts
 automatically when the scenario ends.

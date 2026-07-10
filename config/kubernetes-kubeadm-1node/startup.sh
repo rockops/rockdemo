@@ -12,6 +12,15 @@
 # into the image at $MANIFESTS and applied with `kubectl apply`, which pulls their
 # images on the first run.
 set -e
+
+# Disable swap (required by kubeadm and kubelet)
+swapoff -a
+
+# Ensure inotify limits are sufficient for kubelet / cAdvisor / systemd
+# (proc is writable in privileged containers)
+echo 1024 > /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true
+echo 524288 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
+
 CFG=/var/rockdemo/config/kubernetes-kubeadm-1node
 MANIFESTS=/opt/rockdemo/manifests
 

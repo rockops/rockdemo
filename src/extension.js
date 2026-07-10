@@ -319,6 +319,37 @@ async function sendAfterReady(term, cmds) {
 }
 
 /**
+ * Wait for the container to start running and clear the terminal if no foreground script is running.
+ */
+async function clearTerminalWhenReady(entry, rec, node) {
+  const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
+  if (!clearPref) return;
+
+  // If there is a backend foreground script, fgUngate handles the clearing when it finishes.
+  if (node.foreground) return;
+
+  // Otherwise, wait for the container shell to be ready, then clear.
+  if (rec.ready) await rec.ready;
+  if (entry.disposed) return;
+
+  // Poll until docker exec succeeds (meaning the container is running and accepting execs).
+  for (let i = 0; i < 120; i++) {
+    if (entry.disposed) return;
+    try {
+      await execFile("docker", ["exec", rec.containerName, "true"]);
+      // Container is running! Wait a tiny bit (500ms) for the container shell
+      // prompt to fully initialize, then send "clear".
+      await delay(500);
+      if (entry.disposed) return;
+      rec.terminal.sendText("clear && printf '\\033[3J'", true);
+      return;
+    } catch (err) {
+      await delay(1000);
+    }
+  }
+}
+
+/**
  * Start an interactive shell inside a named Docker container, in a terminal
  * named after the node. Docker is a prerequisite. `--name` lets us target the
  * container; `--rm` cleans up when the shell exits. `mounts` is a list of
@@ -443,15 +474,13 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
     launch
   ).replace(/\s+/g, " ");
   // Wait for the host shell to be ready before typing the launch (a slow
-  // ~/.bashrc otherwise swallows it — see sendAfterReady), then send it followed
-  // by `clear`. The image pull above runs (and is watched) BEFORE the container
-  // shell comes up; the buffered `clear` is only read once that shell is ready,
-  // so it tidies the screen after startup without hiding the pull progress. The
-  // returned `ready` promise resolves once the launch line has been typed, so
-  // startup commands that share this terminal (the intro/backend foreground)
+  // ~/.bashrc otherwise swallows it — see sendAfterReady), then send it. The
+  // image pull above runs (and is watched) BEFORE the container shell comes up.
+  // The returned `ready` promise resolves once the launch line has been typed,
+  // so startup commands that share this terminal (the intro/backend foreground)
   // can wait and never get typed AHEAD of the launch on a slow-shell machine.
   const rec = { name, terminal: term, containerName, mounts: mounts || [] };
-  rec.ready = sendAfterReady(term, [launchLine, "clear"]);
+  rec.ready = sendAfterReady(term, [launchLine]);
   return rec;
 }
 
@@ -489,6 +518,7 @@ function splitDirection(i, layout, raw) {
   if (i === 0) return false;
   if (raw === "down") return "down";
   if (raw === "right" || raw === true) return "right";
+  if (raw === "false" || raw === false || raw === "none") return false;
   if (raw) return "right"; // any other truthy value → default direction
   if (layout === "rows") return "down";
   if (layout === "split" || layout === "columns") return "right";
@@ -631,8 +661,7 @@ function proxyEnvArgs(noProxyExtra) {
   ].join(" ");
 }
 
-/** Launch a container terminal for every node, storing the records on entry. */
-function startNodes(entry) {
+async function startNodes(entry) {
   // Fresh scratch copies for this run: wipe, then stage per node and mount.
   entry.bgDone = new Set(); // re-arm background scripts for this run
   entry.fgDone = new Set(); // re-arm foreground scripts for this run
@@ -690,58 +719,105 @@ function startNodes(entry) {
   const webviewCol = (entry.panel && entry.panel.viewColumn) || vscode.ViewColumn.One;
   const columns = [];
   let editorCol = webviewCol; // last assigned viewColumn
-  let idx = 0;
-  entry.terminals = entry.nodes
-    .filter((n) => n.imageid)
-    .map((n) => {
-      const mounts = entry.baseFsPath ? stageNodeAssets(entry, n) : [];
-      // Mount the scenario folder read-only at /scenario so foreground commands
-      // can find their scripts (they run from there). Read-only is important:
-      // it keeps the host files safe from any container writes.
-      if (entry.baseFsPath) {
-        mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
-      }
-      // When the node references backend-level scripts (background/foreground),
-      // mount the extension's bundled config/ folder read-only so those scripts
-      // are available in the container at CONFIG_MOUNT and run by path.
-      if (n.background || n.foreground) {
-        mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
-      }
-      // Overlay executable copies of any scripts this node invokes by name, so a
-      // non-executable source script still runs (without touching the source).
-      mounts.push(...stageNodeScripts(entry, n));
-      // Mount the host CA bundle so the container trusts the same CAs the host
-      // does — the systemd images merge it into their trust store at boot
-      // (rockdemo-proxy.service), which is what lets pulls work behind a
-      // TLS-intercepting corporate proxy.
-      if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
-      const ports = entry.trafficPorts.get(n.name) || [];
+
+  // Pre-calculate editor columns and layout grid groups
+  const filteredNodes = entry.nodes.filter((n) => n.imageid);
+  const nodeLocations = filteredNodes.map((n, idx) => {
+    if (idx === 0) {
       editorCol += 1;
-      const location = { viewColumn: editorCol }; // own pane; grid shaped below
-      if (n.split === "down" && columns.length) {
-        columns[columns.length - 1].push(idx); // stack below the current column
-      } else {
-        columns.push([idx]); // no split, or "right" → a new column beside
-      }
-      const rec = startNamedContainer(
-        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
-      );
-      idx++;
-      return rec;
-    });
-  // Editor mode: the panes opened as a flat row of columns. If any column has
-  // more than one node (a "down" split), reshape the editor grid so those nodes
-  // stack vertically. Root orientation is horizontal (columns); a nested `groups`
-  // flips to vertical (rows) — exactly the two-level column/row grid we tracked.
-  // The first group is the webview's own column (leftmost); the rest are the node
-  // columns in order, matching the viewColumns assigned above.
-  if (columns.some((c) => c.length > 1)) {
-    const gridLayout = {
-      orientation: 0,
-      groups: [{}, ...columns.map((c) => (c.length > 1 ? { groups: c.map(() => ({})) } : {}))],
-    };
-    setTimeout(() => vscode.commands.executeCommand("vscode.setEditorLayout", gridLayout), 0);
+      columns.push([editorCol]);
+    } else if (n.split === "down" && columns.length) {
+      editorCol += 1;
+      columns[columns.length - 1].push(editorCol);
+    } else if (n.split === "right") {
+      editorCol += 1;
+      columns.push([editorCol]);
+    } // if split is false/omitted, it stays in the current editorCol and columns remains unchanged
+    return editorCol;
+  });
+
+  const cfg = vscode.workspace.getConfiguration();
+  const T = vscode.ConfigurationTarget.Workspace;
+  const prevCloseEmpty = (cfg.inspect("workbench.editor.closeEmptyGroups") || {}).workspaceValue;
+
+  // Temporarily prevent VS Code from closing empty groups while we apply the layout and create terminals.
+  try {
+    await cfg.update("workbench.editor.closeEmptyGroups", false, T);
+  } catch (err) {
+    /* non-fatal */
   }
+
+  // Reshape the editor grid according to the configured scenario layout and terminal splits
+  // BEFORE creating the terminals so the target viewColumns already exist.
+  if (filteredNodes.length > 0) {
+    const layoutPref = vscode.workspace.getConfiguration("rockdemo").get("scenarioLayout", "vertical");
+    let gridLayout;
+    const termGroups = columns.map((c) => (c.length > 1 ? { orientation: 1, groups: c.map(() => ({})) } : {}));
+
+    if (layoutPref === "horizontal") {
+      if (columns.length === 1) {
+        gridLayout = {
+          orientation: 1, // vertical flow (rows)
+          groups: Array.from({ length: 1 + columns[0].length }, () => ({}))
+        };
+      } else {
+        gridLayout = {
+          orientation: 1, // vertical flow (rows)
+          groups: [
+            {}, // Webview (top)
+            {
+              orientation: 0, // horizontal flow (columns)
+              groups: termGroups
+            } // Terminals (bottom)
+          ]
+        };
+      }
+    } else {
+      // Default: "vertical" (left instructions, right terminals)
+      gridLayout = {
+        orientation: 0, // horizontal flow (columns)
+        groups: [
+          {}, // Webview (left)
+          ...termGroups
+        ]
+      };
+    }
+    vscode.commands.executeCommand("vscode.setEditorLayout", gridLayout);
+  }
+
+  let idx = 0;
+  entry.terminals = filteredNodes.map((n) => {
+    const mounts = entry.baseFsPath ? stageNodeAssets(entry, n) : [];
+    // Mount the scenario folder read-only at /scenario so foreground commands
+    // can find their scripts (they run from there). Read-only is important:
+    // it keeps the host files safe from any container writes.
+    if (entry.baseFsPath) {
+      mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
+    }
+    // When the node references backend-level scripts (background/foreground),
+    // mount the extension's bundled config/ folder read-only so those scripts
+    // are available in the container at CONFIG_MOUNT and run by path.
+    if (n.background || n.foreground) {
+      mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
+    }
+    // Overlay executable copies of any scripts this node invokes by name, so a
+    // non-executable source script still runs (without touching the source).
+    mounts.push(...stageNodeScripts(entry, n));
+    // Mount the host CA bundle so the container trusts the same CAs the host
+    // does — the systemd images merge it into their trust store at boot
+    // (rockdemo-proxy.service), which is what lets pulls work behind a
+    // TLS-intercepting corporate proxy.
+    if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
+    const ports = entry.trafficPorts.get(n.name) || [];
+
+    const location = { viewColumn: nodeLocations[idx] };
+    const rec = startNamedContainer(
+      n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
+    );
+    clearTerminalWhenReady(entry, rec, n);
+    idx++;
+    return rec;
+  });
   // Where focus lands once everything has opened. VS Code makes the
   // most-recently-created terminal the active editor, and that selection is
   // applied asynchronously — so anything we do synchronously loses the race.
@@ -759,6 +835,13 @@ function startNodes(entry) {
       setTimeout(() => first.terminal.show(), 0);
     }
   }
+  // Restore the previous setting for closing empty groups.
+  try {
+    await cfg.update("workbench.editor.closeEmptyGroups", prevCloseEmpty, T);
+  } catch (err) {
+    /* non-fatal */
+  }
+
   // Once the containers are up, point every node's /etc/hosts at the others and
   // start the in-container Docker daemon for nodes that requested it.
   updateHosts(entry);
@@ -1495,6 +1578,19 @@ function fgGate(entry, screen, token) {
 function fgUngate(entry, screen, token) {
   const set = entry.fgPending && entry.fgPending.get(screen);
   if (set) set.delete(token);
+
+  // If a backend foreground script just finished, clear the terminal
+  if (token && token.startsWith("node:")) {
+    const nodeName = token.slice("node:".length);
+    const rec = entry.terminals && entry.terminals.find((r) => r.name === nodeName);
+    if (rec && rec.terminal) {
+      const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
+      if (clearPref) {
+        rec.terminal.sendText("clear && printf '\\033[3J'", true);
+      }
+    }
+  }
+
   if (!set || set.size === 0) postForegroundDone(entry, screen);
 }
 
@@ -2696,6 +2792,7 @@ async function applyDemoTerminalStyle(entry) {
     entry.prevTerminalFontSize = (cfg.inspect("terminal.integrated.fontSize") || {})
       .workspaceValue;
     entry.prevColorTheme = (cfg.inspect("workbench.colorTheme") || {}).workspaceValue;
+    entry.prevStickyScroll = (cfg.inspect("terminal.integrated.stickyScroll.enabled") || {}).workspaceValue;
     const merged = Object.assign({}, entry.prevColorCustomizations || {}, DEMO_TERMINAL_COLORS);
     await cfg.update("workbench.colorCustomizations", merged, T);
     // Switch to a light theme so opened files render light with readable tokens.
@@ -2704,13 +2801,15 @@ async function applyDemoTerminalStyle(entry) {
     await cfg.update("workbench.colorTheme", lightTheme, T);
     const fontSize = entry.demoTermFontSize || DEMO_TERMINAL_FONT_SIZE;
     await cfg.update("terminal.integrated.fontSize", fontSize, T);
-    // Clean projection layout: collapse the file-explorer side bar and the
-    // bottom panel so only the scenario instructions and the node terminals
-    // (editor panes) are on screen. Both commands only ever HIDE (no-op if
-    // already hidden); restoreDemoTerminalStyle re-reveals them on exit. VS Code
+    await cfg.update("terminal.integrated.stickyScroll.enabled", false, T);
+    // Clean projection layout: collapse the file-explorer side bar, the
+    // bottom panel, and the agent panel (auxiliary bar) so only the scenario instructions
+    // and the node terminals (editor panes) are on screen. These commands only ever HIDE
+    // (no-op if already hidden); restoreDemoTerminalStyle re-reveals them on exit. VS Code
     // exposes no API to read their prior visibility, so restore always re-shows.
     await vscode.commands.executeCommand("workbench.action.closeSidebar");
     await vscode.commands.executeCommand("workbench.action.closePanel");
+    await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
     entry.demoTermApplied = true;
   } catch (err) {
     vscode.window.showWarningMessage(
@@ -2751,11 +2850,19 @@ async function restoreDemoTerminalStyle(entry) {
     await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
     await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
     await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
-    // Re-reveal the side bar and bottom panel collapsed on demo enter. focusSideBar
-    // reopens (and focuses) the side bar; togglePanel flips the panel we hid back
-    // to visible. See applyDemoTerminalStyle for why this is unconditional.
-    await vscode.commands.executeCommand("workbench.action.focusSideBar");
-    await vscode.commands.executeCommand("workbench.action.togglePanel");
+    await cfg.update("terminal.integrated.stickyScroll.enabled", entry.prevStickyScroll, T);
+    // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
+    // on demo enter, depending on the configuration.
+    const rdCfg = vscode.workspace.getConfiguration("rockdemo");
+    if (rdCfg.get("restoreSidebar", true)) {
+      await vscode.commands.executeCommand("workbench.action.focusSideBar");
+    }
+    if (rdCfg.get("restorePanel", true)) {
+      await vscode.commands.executeCommand("workbench.action.togglePanel");
+    }
+    if (rdCfg.get("restoreAgentPanel", true)) {
+      await vscode.commands.executeCommand("workbench.action.focusAuxiliaryBar");
+    }
   } catch (err) {
     vscode.window.showWarningMessage(
       `rockDemo: could not restore terminal styling after DEMO (${err})`
@@ -3287,14 +3394,20 @@ function trackNodeTerminal(term) {
     mounts: (src && src.mounts) || [],
   });
   // Attach a fresh shell to the RUNNING container as a command in the host shell
-  // (NOT as the terminal's process — see nodeTerminalOptions), then `clear` to
-  // hide the exec line. `cmd` from the node config (fallback `sh`) matches the
-  // shell the node's own terminal launched with. sendAfterReady waits for the
-  // host shell to be live first, so a slow ~/.bashrc can't swallow the exec.
+  // (NOT as the terminal's process — see nodeTerminalOptions). `cmd` from the
+  // node config (fallback `sh`) matches the shell the node's own terminal
+  // launched with. sendAfterReady waits for the host shell to be live first,
+  // so a slow ~/.bashrc can't swallow the exec. Once successfully sent, wait a
+  // moment for the container shell to attach, and clear the terminal if configured.
   sendAfterReady(term, [
     `docker exec -it ${containerNameFor(node.name)} ${node.cmd || "sh"}`,
-    "clear",
-  ]);
+  ]).then(async () => {
+    const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
+    if (clearPref) {
+      await delay(500);
+      term.sendText("clear && printf '\\033[3J'", true);
+    }
+  });
   // Reveal AND focus the new terminal (show() defaults to preserveFocus=false),
   // so the cursor lands in it ready to type — for both the command and the `+`
   // dropdown profile, whose provider gives us no handle to focus otherwise.
