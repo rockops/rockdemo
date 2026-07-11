@@ -21,3 +21,8 @@ scenario-examples/
 # (any scenario: install-kubernetes, install-kubernetes-2nodes, …)
 scenarios/*/LFS458/
 scenarios/*/LFS458_V1.34.1-u1_SOLUTIONS.tar.xz
+
+# Ignore all .vscode folders except the one at the root level
+**/.vscode/
+!/.vscode/
+
