@@ -218,9 +218,10 @@ prompts for the node rather than one entry per live node.)*
 
 | Field | Meaning |
 | --- | --- |
-| `imageid` | Docker image to run for this node. |
+| `imageid` | Docker image to run for this node. (Omit if `connect` is configured). |
+| `connect` | Optional. If set, this node acts as a **secondary terminal** connected to another host's container. Accepts the name or alias of the target node (e.g. `"host1"`). Instead of launching a new container, it attaches to the target node's container using `docker exec -it <targetContainer> <shell>`. If the target container is not yet running, it waits until it starts. Useful for opening multiple terminal panes on the same container. (Can also be specified as `connection`). |
 | `alias` | Optional. An alternate name a scenario may use to target this node — for `details.assets` keys and a step's `host`. Lets one scenario JSON run across backends whose real node names differ (e.g. alias `node1` → real node `controlplane`). |
-| `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh`. |
+| `cmd` | Shell/command to run in the container (e.g. `sh` for alpine, `bash` for ubuntu). Defaults to `sh` (or target container shell for connection terminals). |
 | `ip` | Static IP on the `172.30.0.0/16` subnet. When any node sets one, all nodes join the shared `rockdemo` Docker network. |
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). |
 | `split` | Optional. Splits this node's terminal from the previous node's into its own **pane**. Accepts a direction: `"right"` (a pane **beside**, side-by-side) or `"down"` (a pane **stacked below**). `true` means `"right"`. A node without `split` opens beside as a new column too — the difference is that a `"down"` node stacks under whichever column is current. The first node never splits (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets a default for every node but the first: `"split"`/`"columns"` → `"right"`, `"rows"` → `"down"`. The panes open in the editor area and form a real grid shaped by this direction. |

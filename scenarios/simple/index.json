@@ -67,9 +67,7 @@
       },
       {
         "name": "host3",
-        "imageid": "alpine",
-        "cmd": "sh",
-        "ip": "172.30.3.2",
+        "connect": "host2",
         "split": "down"
       }
     ]

@@ -367,14 +367,19 @@ async function clearTerminalWhenReady(entry, rec, node) {
   if (rec.ready) await rec.ready;
   if (entry.disposed) return;
 
+  const targetNode = node.connect ? entry.nodes.find((x, idx2) => nodeMatches(x, idx2, node.connect)) : null;
+  const containerName = targetNode ? containerNameFor(targetNode.name) : (node.connect ? containerNameFor(node.connect) : rec.containerName);
+  if (!containerName) return;
+
   // Poll until docker exec succeeds (meaning the container is running and accepting execs).
   for (let i = 0; i < 120; i++) {
     if (entry.disposed) return;
     try {
-      await execFile("docker", ["exec", rec.containerName, "true"]);
-      // Container is running! Wait a tiny bit (500ms) for the container shell
-      // prompt to fully initialize, then send "clear".
-      await delay(500);
+      await execFile("docker", ["exec", containerName, "true"]);
+      // Container is running! Wait a tiny bit (1000ms for connection terminals,
+      // 500ms for standard ones) for the container shell prompt to fully
+      // initialize, then send "clear".
+      await delay(node.connect ? 1000 : 500);
       if (entry.disposed) return;
       rec.terminal.sendText("clear && printf '\\033[3J'", true);
       return;
@@ -567,6 +572,7 @@ function nodesFromConfig(nodes, layout) {
   return list.map((n, i) => ({
     name: n.name,
     alias: n.alias || null,
+    connect: n.connect || n.connection || null,
     imageid: n.imageid,
     cmd: n.cmd,
     ip: n.ip,
@@ -756,7 +762,7 @@ async function startNodes(entry) {
   let editorCol = webviewCol; // last assigned viewColumn
 
   // Pre-calculate editor columns and layout grid groups
-  const filteredNodes = entry.nodes.filter((n) => n.imageid);
+  const filteredNodes = entry.nodes.filter((n) => n.imageid || n.connect);
   const nodeLocations = filteredNodes.map((n, idx) => {
     if (idx === 0) {
       editorCol += 1;
@@ -820,39 +826,64 @@ async function startNodes(entry) {
     vscode.commands.executeCommand("vscode.setEditorLayout", gridLayout);
   }
 
-  let idx = 0;
-  entry.terminals = filteredNodes.map((n) => {
-    const mounts = entry.baseFsPath ? stageNodeAssets(entry, n) : [];
-    // Mount the scenario folder read-only at /scenario so foreground commands
-    // can find their scripts (they run from there). Read-only is important:
-    // it keeps the host files safe from any container writes.
-    if (entry.baseFsPath) {
-      mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
-    }
-    // When the node references backend-level scripts (background/foreground),
-    // mount the extension's bundled config/ folder read-only so those scripts
-    // are available in the container at CONFIG_MOUNT and run by path.
-    if (n.background || n.foreground) {
-      mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
-    }
-    // Overlay executable copies of any scripts this node invokes by name, so a
-    // non-executable source script still runs (without touching the source).
-    mounts.push(...stageNodeScripts(entry, n));
-    // Mount the host CA bundle so the container trusts the same CAs the host
-    // does — the systemd images merge it into their trust store at boot
-    // (rockdemo-proxy.service), which is what lets pulls work behind a
-    // TLS-intercepting corporate proxy.
-    if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
-    const ports = entry.trafficPorts.get(n.name) || [];
-
+  const terminals = [];
+  for (let idx = 0; idx < filteredNodes.length; idx++) {
+    const n = filteredNodes[idx];
+    let rec;
     const location = { viewColumn: nodeLocations[idx] };
-    const rec = startNamedContainer(
-      n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
-    );
-    clearTerminalWhenReady(entry, rec, n);
-    idx++;
-    return rec;
-  });
+
+    if (n.connect) {
+      const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect));
+      const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
+      const targetContainer = targetNode ? containerNameFor(targetNode.name) : containerNameFor(n.connect);
+      const shell = n.cmd || (targetNode && targetNode.cmd) || "sh";
+      const term = vscode.window.createTerminal({ name: n.name, location });
+
+      const launchLine = (
+        `until [ "$(docker inspect -f '{{.State.Running}}' ${targetContainer} 2>/dev/null)" = "true" ]; do sleep 0.5; done; ` +
+        `docker exec -it ${targetContainer} ${shell}`
+      ).replace(/\s+/g, " ");
+
+      rec = {
+        name: n.name,
+        terminal: term,
+        containerName: null,
+        mounts: (targetRec && targetRec.mounts) || [],
+      };
+      rec.ready = sendAfterReady(term, [launchLine]);
+      clearTerminalWhenReady(entry, rec, n);
+    } else {
+      const mounts = entry.baseFsPath ? stageNodeAssets(entry, n) : [];
+      // Mount the scenario folder read-only at /scenario so foreground commands
+      // can find their scripts (they run from there). Read-only is important:
+      // it keeps the host files safe from any container writes.
+      if (entry.baseFsPath) {
+        mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
+      }
+      // When the node references backend-level scripts (background/foreground),
+      // mount the extension's bundled config/ folder read-only so those scripts
+      // are available in the container at CONFIG_MOUNT and run by path.
+      if (n.background || n.foreground) {
+        mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
+      }
+      // Overlay executable copies of any scripts this node invokes by name, so a
+      // non-executable source script still runs (without touching the source).
+      mounts.push(...stageNodeScripts(entry, n));
+      // Mount the host CA bundle so the container trusts the same CAs the host
+      // does — the systemd images merge it into their trust store at boot
+      // (rockdemo-proxy.service), which is what lets pulls work behind a
+      // TLS-intercepting corporate proxy.
+      if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
+      const ports = entry.trafficPorts.get(n.name) || [];
+
+      rec = startNamedContainer(
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
+      );
+      clearTerminalWhenReady(entry, rec, n);
+    }
+    terminals.push(rec);
+  }
+  entry.terminals = terminals;
   // Where focus lands once everything has opened. VS Code makes the
   // most-recently-created terminal the active editor, and that selection is
   // applied asynchronously — so anything we do synchronously loses the race.
