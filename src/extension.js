@@ -889,17 +889,12 @@ async function startNodes(entry) {
   // applied asynchronously — so anything we do synchronously loses the race.
   // Defer to a tick that runs after that settles (and after any grid reshape).
   if (entry.terminals.length) {
-    if (entry.panel) {
-      // The node terminals opened in columns to the RIGHT of the webview. Reveal
-      // the instructions in their own column WITH focus so the scenario window is
-      // what the presenter is looking at (and is guaranteed visible beside the
-      // terminals), not a node shell.
-      setTimeout(() => entry.panel.reveal(webviewCol), 0);
-    } else {
-      // No webview panel: fall back to focusing the first node's terminal.
-      const first = entry.terminals[0];
-      setTimeout(() => first.terminal.show(), 0);
-    }
+    const first = entry.terminals[0];
+    setTimeout(() => {
+      if (first && first.terminal) {
+        first.terminal.show();
+      }
+    }, 100);
   }
   // Restore the previous setting for closing empty groups.
   try {
@@ -1888,6 +1883,14 @@ function fgUngate(entry, screen, token) {
 function postForegroundDone(entry, stepId) {
   if (!entry.disposed && entry.panel) {
     entry.panel.webview.postMessage({ type: "foregroundDone", step: stepId });
+  }
+  if (stepId === "intro" && entry.terminals && entry.terminals.length) {
+    const first = entry.terminals[0];
+    setTimeout(() => {
+      if (first && first.terminal) {
+        first.terminal.show();
+      }
+    }, 100);
   }
 }
 
