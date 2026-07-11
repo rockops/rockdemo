@@ -126,7 +126,7 @@ function runExec(cmd, opts) {
     vscode.window.activeTerminal || vscode.window.createTerminal("rockDemo");
   term.show();
   if (opts && opts.background) {
-    applyTerminalBackground(opts.background);
+    applyTerminalBackground(undefined, opts.background);
   }
   if (opts && opts.interrupt) sendInterruptThen(term, cmd);
   // `true` appends a newline — i.e. types the command AND presses Enter.
@@ -1058,26 +1058,212 @@ function trackActivePanel(panel) {
   });
 }
 
+function getConfigurationTarget() {
+  return vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+}
+
+function getInspectValue(inspectResult, target) {
+  if (!inspectResult) return undefined;
+  return target === vscode.ConfigurationTarget.Workspace
+    ? inspectResult.workspaceValue
+    : inspectResult.globalValue;
+}
+
 function isDemoModeActive() {
   if (runningScenarioEntry && runningScenarioEntry.demoTermApplied) return true;
   if (activeDemoEntry && activeDemoEntry.demoTermApplied) return true;
   return false;
 }
 
-async function applyTerminalBackground(color) {
+/**
+ * Map standard/common CSS color keywords to their hex equivalents.
+ * Strips any surrounding single or double quotes, and normalises to lowercase.
+ * Returns the resolved hex color, or the original string if not a keyword.
+ */
+function resolveColor(color) {
+  if (!color) return undefined;
+  let clean = color.trim().replace(/^['"]|['"]$/g, "").trim().toLowerCase();
+  if (clean === "default") return "default";
+  if (clean.startsWith("#")) return clean;
+
+  const colorMap = {
+    black: "#000000",
+    silver: "#c0c0c0",
+    gray: "#808080",
+    grey: "#808080",
+    white: "#ffffff",
+    maroon: "#800000",
+    red: "#ff0000",
+    purple: "#800080",
+    fuchsia: "#ff00ff",
+    green: "#008000",
+    lime: "#00ff00",
+    olive: "#808000",
+    yellow: "#ffff00",
+    navy: "#000080",
+    blue: "#0000ff",
+    teal: "#008080",
+    aqua: "#00ffff",
+    orange: "#ffa500",
+    aliceblue: "#f0f8ff",
+    antiquewhite: "#faebd7",
+    aquamarine: "#7fffd4",
+    azure: "#f0ffff",
+    beige: "#f5f5dc",
+    bisque: "#ffe4c4",
+    blanchedalmond: "#ffebcd",
+    blueviolet: "#8a2be2",
+    brown: "#a52a2a",
+    burlywood: "#deb887",
+    cadetblue: "#5f9ea0",
+    chartreuse: "#7fff00",
+    chocolate: "#d2691e",
+    coral: "#ff7f50",
+    cornflowerblue: "#6495ed",
+    cornsilk: "#fff8dc",
+    crimson: "#dc143c",
+    darkblue: "#00008b",
+    darkcyan: "#008b8b",
+    darkgoldenrod: "#b8860b",
+    darkgray: "#a9a9a9",
+    darkgrey: "#a9a9a9",
+    darkgreen: "#006400",
+    darkkhaki: "#bdb76b",
+    darkmagenta: "#8b008b",
+    darkolivegreen: "#556b2f",
+    darkorange: "#ff8c00",
+    darkorchid: "#9932cc",
+    darkred: "#8b0000",
+    darksalmon: "#e9967a",
+    darkseagreen: "#8fbc8f",
+    darkslateblue: "#483d8b",
+    darkslategray: "#2f4f4f",
+    darkslategrey: "#2f4f4f",
+    darkturquoise: "#00ced1",
+    darkviolet: "#9400d3",
+    deeppink: "#ff1493",
+    deepskyblue: "#00bfff",
+    dimgray: "#696969",
+    dimgrey: "#696969",
+    dodgerblue: "#1e90ff",
+    firebrick: "#b22222",
+    floralwhite: "#fffaf0",
+    forestgreen: "#228b22",
+    gainsboro: "#dcdcdc",
+    ghostwhite: "#f8f8ff",
+    gold: "#ffd700",
+    goldenrod: "#daa520",
+    greenyellow: "#adff2f",
+    honeydew: "#f0fff0",
+    hotpink: "#ff69b4",
+    indianred: "#cd5c5c",
+    indigo: "#4b0082",
+    ivory: "#fffff0",
+    khaki: "#f0e68c",
+    lavender: "#e6e6fa",
+    lavenderblush: "#fff0f5",
+    lawngreen: "#7cfc00",
+    lemonchiffon: "#fffacd",
+    lightblue: "#add8e6",
+    lightcoral: "#f08080",
+    lightcyan: "#e0ffff",
+    lightgoldenrodyellow: "#fafad2",
+    lightgray: "#d3d3d3",
+    lightgrey: "#d3d3d3",
+    lightgreen: "#90ee90",
+    lightpink: "#ffb6c1",
+    lightsalmon: "#ffa07a",
+    lightseagreen: "#20b2aa",
+    lightskyblue: "#87cefa",
+    lightslategray: "#778899",
+    lightslategrey: "#778899",
+    lightsteelblue: "#b0c4de",
+    lightyellow: "#ffffe0",
+    limegreen: "#32cd32",
+    linen: "#faf0e6",
+    magenta: "#ff00ff",
+    mediumaquamarine: "#66cdaa",
+    mediumblue: "#0000cd",
+    mediumorchid: "#ba55d3",
+    mediumpurple: "#9370db",
+    mediumseagreen: "#3cb371",
+    mediumslateblue: "#7b68ee",
+    mediumspringgreen: "#00fa9a",
+    mediumturquoise: "#48d1cc",
+    mediumvioletred: "#c71585",
+    midnightblue: "#191970",
+    mintcream: "#f5fffa",
+    mistyrose: "#ffe4e1",
+    moccasin: "#ffe4b5",
+    navajowhite: "#ffdead",
+    oldlace: "#fdf5e6",
+    olivedrab: "#6b8e23",
+    orangered: "#ff4500",
+    orchid: "#da70d6",
+    palegoldenrod: "#eee8aa",
+    palegreen: "#98fb98",
+    paleturquoise: "#afeeee",
+    palevioletred: "#db7093",
+    papayawhip: "#ffefd5",
+    peachpuff: "#ffdab9",
+    peru: "#cd853f",
+    pink: "#ffc0cb",
+    plum: "#dda0dd",
+    powderblue: "#b0e0e6",
+    rosybrown: "#bc8f8f",
+    royalblue: "#4169e1",
+    saddlebrown: "#8b4513",
+    salmon: "#fa8072",
+    sandybrown: "#f4a460",
+    seagreen: "#2e8b57",
+    seashell: "#fff5ee",
+    sienna: "#a0522d",
+    skyblue: "#87ceeb",
+    slateblue: "#6a5acd",
+    slategray: "#708090",
+    slategrey: "#708090",
+    snow: "#fffafa",
+    springgreen: "#00ff7f",
+    steelblue: "#4682b4",
+    tan: "#d2b48c",
+    thistle: "#d8bfd8",
+    tomato: "#ff6347",
+    turquoise: "#40e0d0",
+    violet: "#ee82ee",
+    wheat: "#f5deb3",
+    yellowgreen: "#9acd32"
+  };
+
+  return colorMap[clean] || color;
+}
+
+async function applyTerminalBackground(entry, color) {
   if (!isDemoModeActive()) return;
   if (!color) return;
+  const resolved = resolveColor(color);
+  if (!resolved) return;
   try {
     const cfg = vscode.workspace.getConfiguration();
-    const T = vscode.ConfigurationTarget.Workspace;
+    const T = getConfigurationTarget();
+    if (entry && entry.prevColorCustomizations === undefined) {
+      const colorsInsp = cfg.inspect("workbench.colorCustomizations");
+      entry.prevColorCustomizations = getInspectValue(colorsInsp, T);
+    }
     const current = cfg.get("workbench.colorCustomizations") || {};
     const updated = { ...current };
-    if (color === "default") {
+    if (resolved === "default") {
       delete updated["terminal.background"];
+      delete updated["panel.background"];
     } else {
-      updated["terminal.background"] = color;
+      updated["terminal.background"] = resolved;
+      updated["panel.background"] = resolved;
     }
     await cfg.update("workbench.colorCustomizations", updated, T);
+    if (entry) {
+      entry.termBgApplied = true;
+    }
   } catch (err) {
     // ignore
   }
@@ -1872,8 +2058,8 @@ function mapContainerPath(entry, containerPath) {
  * would keep whatever state the previous run left them in.)
  */
 function restartScenario(entry) {
-  if (entry.demoTermApplied) {
-    applyTerminalBackground("default");
+  if (entry.demoTermApplied || entry.termBgApplied) {
+    applyTerminalBackground(entry, "default");
   }
   disposeEntryTerminals(entry);
   entry.startPromise = startNodes(entry);
@@ -2270,7 +2456,7 @@ function renderMarkdownToHtml(text, baseStr, webview) {
         if (action && body.trim().length > 0) {
           // Actionable block → buttons.
           out.push(
-            blockButtons({ action, lang, content: body, interrupt: ann.interrupt }, baseStr)
+            blockButtons({ action, lang, content: body, interrupt: ann.interrupt, background: ann.background }, baseStr)
           );
         } else if (body.trim().length > 0) {
           // Non-actionable fence → display it as a (optionally highlighted) code
@@ -2818,7 +3004,7 @@ function sendToEntryTerminal(entry, cmd, interrupt, background) {
     entry.terminals.find((r) => r.terminal === active) || entry.terminals[0];
   rec.terminal.show();
   if (background && entry.demoTermApplied) {
-    applyTerminalBackground(background);
+    applyTerminalBackground(entry, background);
   }
   // With {{exec interrupt}}, Ctrl+C first to stop any running foreground process.
   if (interrupt) sendInterruptThen(rec.terminal, cmd);
@@ -2851,14 +3037,19 @@ const DEMO_TERMINAL_COLORS = {
 async function applyDemoTerminalStyle(entry) {
   if (entry.demoTermApplied) return;
   const cfg = vscode.workspace.getConfiguration();
-  const T = vscode.ConfigurationTarget.Workspace;
+  const T = getConfigurationTarget();
   try {
     const colorsInsp = cfg.inspect("workbench.colorCustomizations");
-    entry.prevColorCustomizations = colorsInsp && colorsInsp.workspaceValue;
-    entry.prevTerminalFontSize = (cfg.inspect("terminal.integrated.fontSize") || {})
-      .workspaceValue;
-    entry.prevColorTheme = (cfg.inspect("workbench.colorTheme") || {}).workspaceValue;
-    entry.prevStickyScroll = (cfg.inspect("terminal.integrated.stickyScroll.enabled") || {}).workspaceValue;
+    entry.prevColorCustomizations = getInspectValue(colorsInsp, T);
+    entry.prevTerminalFontSize = getInspectValue(
+      cfg.inspect("terminal.integrated.fontSize"),
+      T
+    );
+    entry.prevColorTheme = getInspectValue(cfg.inspect("workbench.colorTheme"), T);
+    entry.prevStickyScroll = getInspectValue(
+      cfg.inspect("terminal.integrated.stickyScroll.enabled"),
+      T
+    );
     const merged = Object.assign({}, entry.prevColorCustomizations || {}, DEMO_TERMINAL_COLORS);
     await cfg.update("workbench.colorCustomizations", merged, T);
     // Switch to a light theme so opened files render light with readable tokens.
@@ -2899,7 +3090,7 @@ async function setDemoTerminalFontSize(entry, px) {
       .update(
         "terminal.integrated.fontSize",
         px,
-        vscode.ConfigurationTarget.Workspace
+        getConfigurationTarget()
       );
   } catch (err) {
     /* non-fatal: the webview font still changed */
@@ -2908,26 +3099,33 @@ async function setDemoTerminalFontSize(entry, px) {
 
 /** Undo applyDemoTerminalStyle, restoring the exact previous workspace values. */
 async function restoreDemoTerminalStyle(entry) {
-  if (!entry.demoTermApplied) return;
+  if (!entry.demoTermApplied && !entry.termBgApplied) return;
   const cfg = vscode.workspace.getConfiguration();
-  const T = vscode.ConfigurationTarget.Workspace;
+  const T = getConfigurationTarget();
+  const demoApplied = entry.demoTermApplied;
+  const bgApplied = entry.termBgApplied;
   entry.demoTermApplied = false; // clear first so a failed restore can't loop
+  entry.termBgApplied = false;
   try {
-    await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
-    await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
-    await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
-    await cfg.update("terminal.integrated.stickyScroll.enabled", entry.prevStickyScroll, T);
-    // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
-    // on demo enter, depending on the configuration.
-    const rdCfg = vscode.workspace.getConfiguration("rockdemo");
-    if (rdCfg.get("restoreSidebar", true)) {
-      await vscode.commands.executeCommand("workbench.action.focusSideBar");
+    if (demoApplied || bgApplied) {
+      await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
     }
-    if (rdCfg.get("restorePanel", true)) {
-      await vscode.commands.executeCommand("workbench.action.togglePanel");
-    }
-    if (rdCfg.get("restoreAgentPanel", true)) {
-      await vscode.commands.executeCommand("workbench.action.focusAuxiliaryBar");
+    if (demoApplied) {
+      await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
+      await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
+      await cfg.update("terminal.integrated.stickyScroll.enabled", entry.prevStickyScroll, T);
+      // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
+      // on demo enter, depending on the configuration.
+      const rdCfg = vscode.workspace.getConfiguration("rockdemo");
+      if (rdCfg.get("restoreSidebar", true)) {
+        await vscode.commands.executeCommand("workbench.action.focusSideBar");
+      }
+      if (rdCfg.get("restorePanel", true)) {
+        await vscode.commands.executeCommand("workbench.action.togglePanel");
+      }
+      if (rdCfg.get("restoreAgentPanel", true)) {
+        await vscode.commands.executeCommand("workbench.action.focusAuxiliaryBar");
+      }
     }
   } catch (err) {
     vscode.window.showWarningMessage(

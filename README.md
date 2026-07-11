@@ -141,6 +141,27 @@ there: **https://killercoda.com/creators**. In short, a scenario folder has an
 steps (`details.steps`), each pointing at a markdown file. Annotate commands in
 that markdown with `{{exec}}` (run), `{{copy}}`, or `{{open}}`.
 
+### Custom Terminal Background Colors
+
+While in **DEMO MODE**, you can dynamically change the background color of the terminal when executing a code block. To do this, add a `background=<color>` modifier to the `{{exec}}` annotation:
+
+```markdown
+```bash
+echo "Changing background to grey!"
+```{{exec background=grey}}
+
+```bash
+echo "Returning terminal to default style"
+```{{exec background=default}}
+```
+
+Both hex codes (e.g. `background=#1e1e1e`) and standard CSS color names (e.g. `grey`, `black`, `navy`) are supported. Use `background=default` to reset the terminal background back to the theme default. Note that this feature is active only while **DEMO MODE** is toggled on.
+
+> [!NOTE]
+> **VS Code Limitation:** Due to a VS Code API limitation, setting a terminal background color dynamically changes the background color globally for **all** integrated terminals in the workspace, not just the single target terminal.
+
+> **⚠️ Not Killercoda-compatible:** Custom terminal backgrounds are a **rockDemo-only** feature. Killercoda does not support the `background` modifier and will ignore it.
+
 ### Multi-node environments (`backendExtended`)
 
 Killercoda scenarios select an environment with a single `backend.imageid`.
