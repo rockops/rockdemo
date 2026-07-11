@@ -162,6 +162,30 @@ Both hex codes (e.g. `background=#1e1e1e`) and standard CSS color names (e.g. `g
 
 > **⚠️ Not Killercoda-compatible:** Custom terminal backgrounds are a **rockDemo-only** feature. Killercoda does not support the `background` modifier and will ignore it.
 
+### Targeting Specific Terminals
+
+In multi-node environments, you can direct a command to execute on a specific node terminal by adding the `target=<node>` modifier to the `{{exec}}` annotation:
+
+```markdown
+```bash
+echo "Hello from controlplane!"
+```{{exec target=controlplane}}
+
+```bash
+echo "Hello from worker node 01!"
+```{{exec target=host02}}
+```
+
+The target can be:
+- The node's real `name` (e.g. `controlplane`).
+- The node's optional `alias` configured in the backend profile (e.g. `host01`).
+- Positional aliases automatically mapped by rockDemo based on the node order: `host1`/`host01`, `host2`/`host02`, etc.
+
+When `target` is not set, the command is executed in the active terminal (or falls back to the first node terminal).
+
+> **⚠️ Not Killercoda-compatible:** The `target` modifier is a **rockDemo-only** feature. Killercoda does not support target annotations and will ignore them.
+
+
 ### Multi-node environments (`backendExtended`)
 
 Killercoda scenarios select an environment with a single `backend.imageid`.

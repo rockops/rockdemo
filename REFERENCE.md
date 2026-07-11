@@ -63,15 +63,15 @@ The webview uses a small zero-dependency markdown renderer that also supports:
   actionable block (great while authoring a scenario).
 - **Demo / preview mode** — click the **▶ Run demo** button in the editor
   title bar (next to VS Code's own preview button, shown for any markdown
-  file). This opens a dedicated **Webview** that renders the markdown like a
+  file). This opens a dedicated **Webview Panel** (note: this is a webview panel, not a terminal) that renders the markdown like a
   preview, **hides the meta fences** (` ```bash ` etc.), and replaces each
   actionable block with clickable buttons. The panel auto-refreshes as you edit
   or save the source file.
 
-  > rockDemo uses its own webview rather than VS Code's built-in markdown
+  > rockDemo uses its own webview panel rather than VS Code's built-in markdown
   > preview on purpose: the built-in preview renders content as *untrusted*,
   > which disables `command:` links and offers no message channel back to the
-  > extension — so it can't run terminal commands. A self-owned webview can.
+  > extension — so it can't run terminal commands. A self-owned webview panel can.
 
 - **▶ Run in terminal** reuses the active terminal if one exists, otherwise
   creates a terminal named `rockDemo`. The command is typed *and* executed
