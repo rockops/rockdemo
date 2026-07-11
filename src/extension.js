@@ -576,7 +576,7 @@ function nodesFromConfig(nodes, layout) {
     imageid: n.imageid,
     cmd: n.cmd,
     ip: n.ip,
-    docker: !!n.docker,
+    docker: !!(n.docker || n.privileged),
     systemd: !!n.systemd,
     background: n.background || null,
     foreground: n.foreground || null,

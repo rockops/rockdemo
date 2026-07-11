@@ -33,8 +33,8 @@ python3 --version
 ```{{exec}}
 
 ```sh
-echo "I am host2"
-```{{exec target=host2}}
+echo "I am host3"
+```{{exec target=host3}}
 
 
 ## Step 3 — Copy only
