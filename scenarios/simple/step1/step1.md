@@ -16,6 +16,14 @@ cat /var/log/rockdemo/simple/intro_background.log
 ```
 
 
+```bash
+echo "Changing background to grey!"
+```{{exec background=lightgrey}}
+
+```bash
+echo "Returning terminal to default style"
+```{{exec background=default}}
+
 ## Step 2 — Explicit exec
 
 Any block can be made runnable with the `{{exec}}` annotation:
@@ -23,6 +31,11 @@ Any block can be made runnable with the `{{exec}}` annotation:
 ```sh
 python3 --version
 ```{{exec}}
+
+```sh
+echo "I am host2"
+```{{exec target=host2}}
+
 
 ## Step 3 — Copy only
 

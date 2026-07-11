@@ -21,9 +21,25 @@ let extensionUri = null;
  * @returns {{ present: boolean, action: string|undefined, interrupt: boolean }}
  */
 function parseAnnotation(raw) {
-  if (raw === undefined) return { present: false, action: undefined, interrupt: false };
+  if (raw === undefined) return { present: false, action: undefined, interrupt: false, background: undefined, target: undefined };
   const parts = raw.trim().split(/\s+/).filter(Boolean);
-  return { present: true, action: parts[0], interrupt: parts.includes("interrupt") };
+  let action = parts[0];
+  let interrupt = false;
+  let background = undefined;
+  let target = undefined;
+  for (const part of parts) {
+    if (part === "interrupt") {
+      interrupt = true;
+    } else if (part.startsWith("background=")) {
+      background = part.split("=")[1];
+    } else if (part.startsWith("target=")) {
+      target = part.split("=")[1];
+    }
+  }
+  if (action && (action.startsWith("background=") || action === "interrupt" || action.startsWith("target="))) {
+    action = undefined;
+  }
+  return { present: true, action, interrupt, background, target };
 }
 
 /**
@@ -72,13 +88,13 @@ function parseScenario(document) {
 
       const ann = parseAnnotation(close[1]);
       let action = ann.action; // exec | copy | open | undefined ({{}} disables)
-      if (!ann.present && ["bash", "sh", "shell"].includes(lang)) {
+      if (!action && ["bash", "sh", "shell"].includes(lang) && close[1] !== "") {
         action = "exec";
       }
 
       const body = content.join("\n");
       if (action && body.trim().length > 0) {
-        blocks.push({ openLine, action, lang, content: body, interrupt: ann.interrupt });
+        blocks.push({ openLine, action, lang, content: body, interrupt: ann.interrupt, background: ann.background, target: ann.target });
       }
       continue;
     }
@@ -109,12 +125,31 @@ function sendInterruptThen(term, cmd) {
 }
 
 function runExec(cmd, opts) {
-  const term =
-    vscode.window.activeTerminal || vscode.window.createTerminal("rockDemo");
-  term.show();
-  if (opts && opts.interrupt) sendInterruptThen(term, cmd);
-  // `true` appends a newline — i.e. types the command AND presses Enter.
-  else term.sendText(cmd, true);
+  try {
+    let term;
+    if (opts && opts.target && runningScenarioEntry) {
+      const rec = pickHost(runningScenarioEntry, opts.target);
+      if (rec) {
+        term = rec.terminal;
+      }
+    }
+    if (!term) {
+      term = vscode.window.activeTerminal || vscode.window.createTerminal("rockDemo");
+    }
+    if (term) {
+      term.show();
+      if (opts && opts.background) {
+        applyTerminalBackground(undefined, opts.background);
+      }
+      if (opts && opts.interrupt) sendInterruptThen(term, cmd);
+      // `true` appends a newline — i.e. types the command AND presses Enter.
+      else term.sendText(cmd, true);
+    } else {
+      vscode.window.showErrorMessage("rockDemo: No active terminal session could be resolved");
+    }
+  } catch (err) {
+    vscode.window.showErrorMessage(`rockDemo: runExec failed with error: ${err.message}`);
+  }
 }
 
 async function runCopy(cmd) {
@@ -332,14 +367,19 @@ async function clearTerminalWhenReady(entry, rec, node) {
   if (rec.ready) await rec.ready;
   if (entry.disposed) return;
 
+  const targetNode = node.connect ? entry.nodes.find((x, idx2) => nodeMatches(x, idx2, node.connect)) : null;
+  const containerName = targetNode ? containerNameFor(targetNode.name) : (node.connect ? containerNameFor(node.connect) : rec.containerName);
+  if (!containerName) return;
+
   // Poll until docker exec succeeds (meaning the container is running and accepting execs).
   for (let i = 0; i < 120; i++) {
     if (entry.disposed) return;
     try {
-      await execFile("docker", ["exec", rec.containerName, "true"]);
-      // Container is running! Wait a tiny bit (500ms) for the container shell
-      // prompt to fully initialize, then send "clear".
-      await delay(500);
+      await execFile("docker", ["exec", containerName, "true"]);
+      // Container is running! Wait a tiny bit (1000ms for connection terminals,
+      // 500ms for standard ones) for the container shell prompt to fully
+      // initialize, then send "clear".
+      await delay(node.connect ? 1000 : 500);
       if (entry.disposed) return;
       rec.terminal.sendText("clear && printf '\\033[3J'", true);
       return;
@@ -532,6 +572,7 @@ function nodesFromConfig(nodes, layout) {
   return list.map((n, i) => ({
     name: n.name,
     alias: n.alias || null,
+    connect: n.connect || n.connection || null,
     imageid: n.imageid,
     cmd: n.cmd,
     ip: n.ip,
@@ -721,7 +762,7 @@ async function startNodes(entry) {
   let editorCol = webviewCol; // last assigned viewColumn
 
   // Pre-calculate editor columns and layout grid groups
-  const filteredNodes = entry.nodes.filter((n) => n.imageid);
+  const filteredNodes = entry.nodes.filter((n) => n.imageid || n.connect);
   const nodeLocations = filteredNodes.map((n, idx) => {
     if (idx === 0) {
       editorCol += 1;
@@ -785,55 +826,75 @@ async function startNodes(entry) {
     vscode.commands.executeCommand("vscode.setEditorLayout", gridLayout);
   }
 
-  let idx = 0;
-  entry.terminals = filteredNodes.map((n) => {
-    const mounts = entry.baseFsPath ? stageNodeAssets(entry, n) : [];
-    // Mount the scenario folder read-only at /scenario so foreground commands
-    // can find their scripts (they run from there). Read-only is important:
-    // it keeps the host files safe from any container writes.
-    if (entry.baseFsPath) {
-      mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
-    }
-    // When the node references backend-level scripts (background/foreground),
-    // mount the extension's bundled config/ folder read-only so those scripts
-    // are available in the container at CONFIG_MOUNT and run by path.
-    if (n.background || n.foreground) {
-      mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
-    }
-    // Overlay executable copies of any scripts this node invokes by name, so a
-    // non-executable source script still runs (without touching the source).
-    mounts.push(...stageNodeScripts(entry, n));
-    // Mount the host CA bundle so the container trusts the same CAs the host
-    // does — the systemd images merge it into their trust store at boot
-    // (rockdemo-proxy.service), which is what lets pulls work behind a
-    // TLS-intercepting corporate proxy.
-    if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
-    const ports = entry.trafficPorts.get(n.name) || [];
-
+  const terminals = [];
+  for (let idx = 0; idx < filteredNodes.length; idx++) {
+    const n = filteredNodes[idx];
+    let rec;
     const location = { viewColumn: nodeLocations[idx] };
-    const rec = startNamedContainer(
-      n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
-    );
-    clearTerminalWhenReady(entry, rec, n);
-    idx++;
-    return rec;
-  });
+
+    if (n.connect) {
+      const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect));
+      const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
+      const targetContainer = targetNode ? containerNameFor(targetNode.name) : containerNameFor(n.connect);
+      const shell = n.cmd || (targetNode && targetNode.cmd) || "sh";
+      const term = vscode.window.createTerminal({ name: n.name, location });
+
+      const launchLine = (
+        `until [ "$(docker inspect -f '{{.State.Running}}' ${targetContainer} 2>/dev/null)" = "true" ]; do sleep 0.5; done; ` +
+        `docker exec -it ${targetContainer} ${shell}`
+      ).replace(/\s+/g, " ");
+
+      rec = {
+        name: n.name,
+        terminal: term,
+        containerName: null,
+        mounts: (targetRec && targetRec.mounts) || [],
+      };
+      rec.ready = sendAfterReady(term, [launchLine]);
+      clearTerminalWhenReady(entry, rec, n);
+    } else {
+      const mounts = entry.baseFsPath ? stageNodeAssets(entry, n) : [];
+      // Mount the scenario folder read-only at /scenario so foreground commands
+      // can find their scripts (they run from there). Read-only is important:
+      // it keeps the host files safe from any container writes.
+      if (entry.baseFsPath) {
+        mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
+      }
+      // When the node references backend-level scripts (background/foreground),
+      // mount the extension's bundled config/ folder read-only so those scripts
+      // are available in the container at CONFIG_MOUNT and run by path.
+      if (n.background || n.foreground) {
+        mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
+      }
+      // Overlay executable copies of any scripts this node invokes by name, so a
+      // non-executable source script still runs (without touching the source).
+      mounts.push(...stageNodeScripts(entry, n));
+      // Mount the host CA bundle so the container trusts the same CAs the host
+      // does — the systemd images merge it into their trust store at boot
+      // (rockdemo-proxy.service), which is what lets pulls work behind a
+      // TLS-intercepting corporate proxy.
+      if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
+      const ports = entry.trafficPorts.get(n.name) || [];
+
+      rec = startNamedContainer(
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
+      );
+      clearTerminalWhenReady(entry, rec, n);
+    }
+    terminals.push(rec);
+  }
+  entry.terminals = terminals;
   // Where focus lands once everything has opened. VS Code makes the
   // most-recently-created terminal the active editor, and that selection is
   // applied asynchronously — so anything we do synchronously loses the race.
   // Defer to a tick that runs after that settles (and after any grid reshape).
   if (entry.terminals.length) {
-    if (entry.panel) {
-      // The node terminals opened in columns to the RIGHT of the webview. Reveal
-      // the instructions in their own column WITH focus so the scenario window is
-      // what the presenter is looking at (and is guaranteed visible beside the
-      // terminals), not a node shell.
-      setTimeout(() => entry.panel.reveal(webviewCol), 0);
-    } else {
-      // No webview panel: fall back to focusing the first node's terminal.
-      const first = entry.terminals[0];
-      setTimeout(() => first.terminal.show(), 0);
-    }
+    const first = entry.terminals[0];
+    setTimeout(() => {
+      if (first && first.terminal) {
+        first.terminal.show();
+      }
+    }, 100);
   }
   // Restore the previous setting for closing empty groups.
   try {
@@ -998,6 +1059,7 @@ function firstNodeImage(entry) {
 // The rockDemo webview panel (demo or scenario) currently focused, if any.
 // Drives the title-bar Stop button for the markdown demo and rockdemo.stop.
 let activeDemoPanel = null;
+let activeDemoEntry = null;
 
 // The running scenario player, if any. Only one scenario may run at a time:
 // while set, the `rockdemo.scenarioRunning` context key is true, which hides
@@ -1020,13 +1082,236 @@ function setScenarioRunning(panel) {
 /** Track a panel as the active demo window, clearing the ref when it closes. */
 function trackActivePanel(panel) {
   activeDemoPanel = panel;
+  if (panel.entry && !panel.entry.nodes) {
+    activeDemoEntry = panel.entry;
+  }
   panel.onDidChangeViewState((e) => {
-    if (e.webviewPanel.active) activeDemoPanel = e.webviewPanel;
-    else if (activeDemoPanel === e.webviewPanel) activeDemoPanel = null;
+    if (e.webviewPanel.active) {
+      activeDemoPanel = e.webviewPanel;
+      if (e.webviewPanel.entry && !e.webviewPanel.entry.nodes) {
+        activeDemoEntry = e.webviewPanel.entry;
+      }
+    }
+    else if (activeDemoPanel === e.webviewPanel) {
+      activeDemoPanel = null;
+      if (activeDemoEntry === e.webviewPanel.entry) activeDemoEntry = null;
+    }
   });
   panel.onDidDispose(() => {
     if (activeDemoPanel === panel) activeDemoPanel = null;
+    if (activeDemoEntry === panel.entry) activeDemoEntry = null;
   });
+}
+
+function getConfigurationTarget() {
+  return vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+}
+
+function getInspectValue(inspectResult, target) {
+  if (!inspectResult) return undefined;
+  return target === vscode.ConfigurationTarget.Workspace
+    ? inspectResult.workspaceValue
+    : inspectResult.globalValue;
+}
+
+function isDemoModeActive() {
+  if (runningScenarioEntry && runningScenarioEntry.demoTermApplied) return true;
+  if (activeDemoEntry && activeDemoEntry.demoTermApplied) return true;
+  return false;
+}
+
+/**
+ * Map standard/common CSS color keywords to their hex equivalents.
+ * Strips any surrounding single or double quotes, and normalises to lowercase.
+ * Returns the resolved hex color, or the original string if not a keyword.
+ */
+function resolveColor(color) {
+  if (!color) return undefined;
+  let clean = color.trim().replace(/^['"]|['"]$/g, "").trim().toLowerCase();
+  if (clean === "default") return "default";
+  if (clean.startsWith("#")) return clean;
+
+  const colorMap = {
+    black: "#000000",
+    silver: "#c0c0c0",
+    gray: "#808080",
+    grey: "#808080",
+    white: "#ffffff",
+    maroon: "#800000",
+    red: "#ff0000",
+    purple: "#800080",
+    fuchsia: "#ff00ff",
+    green: "#008000",
+    lime: "#00ff00",
+    olive: "#808000",
+    yellow: "#ffff00",
+    navy: "#000080",
+    blue: "#0000ff",
+    teal: "#008080",
+    aqua: "#00ffff",
+    orange: "#ffa500",
+    aliceblue: "#f0f8ff",
+    antiquewhite: "#faebd7",
+    aquamarine: "#7fffd4",
+    azure: "#f0ffff",
+    beige: "#f5f5dc",
+    bisque: "#ffe4c4",
+    blanchedalmond: "#ffebcd",
+    blueviolet: "#8a2be2",
+    brown: "#a52a2a",
+    burlywood: "#deb887",
+    cadetblue: "#5f9ea0",
+    chartreuse: "#7fff00",
+    chocolate: "#d2691e",
+    coral: "#ff7f50",
+    cornflowerblue: "#6495ed",
+    cornsilk: "#fff8dc",
+    crimson: "#dc143c",
+    darkblue: "#00008b",
+    darkcyan: "#008b8b",
+    darkgoldenrod: "#b8860b",
+    darkgray: "#a9a9a9",
+    darkgrey: "#a9a9a9",
+    darkgreen: "#006400",
+    darkkhaki: "#bdb76b",
+    darkmagenta: "#8b008b",
+    darkolivegreen: "#556b2f",
+    darkorange: "#ff8c00",
+    darkorchid: "#9932cc",
+    darkred: "#8b0000",
+    darksalmon: "#e9967a",
+    darkseagreen: "#8fbc8f",
+    darkslateblue: "#483d8b",
+    darkslategray: "#2f4f4f",
+    darkslategrey: "#2f4f4f",
+    darkturquoise: "#00ced1",
+    darkviolet: "#9400d3",
+    deeppink: "#ff1493",
+    deepskyblue: "#00bfff",
+    dimgray: "#696969",
+    dimgrey: "#696969",
+    dodgerblue: "#1e90ff",
+    firebrick: "#b22222",
+    floralwhite: "#fffaf0",
+    forestgreen: "#228b22",
+    gainsboro: "#dcdcdc",
+    ghostwhite: "#f8f8ff",
+    gold: "#ffd700",
+    goldenrod: "#daa520",
+    greenyellow: "#adff2f",
+    honeydew: "#f0fff0",
+    hotpink: "#ff69b4",
+    indianred: "#cd5c5c",
+    indigo: "#4b0082",
+    ivory: "#fffff0",
+    khaki: "#f0e68c",
+    lavender: "#e6e6fa",
+    lavenderblush: "#fff0f5",
+    lawngreen: "#7cfc00",
+    lemonchiffon: "#fffacd",
+    lightblue: "#add8e6",
+    lightcoral: "#f08080",
+    lightcyan: "#e0ffff",
+    lightgoldenrodyellow: "#fafad2",
+    lightgray: "#d3d3d3",
+    lightgrey: "#d3d3d3",
+    lightgreen: "#90ee90",
+    lightpink: "#ffb6c1",
+    lightsalmon: "#ffa07a",
+    lightseagreen: "#20b2aa",
+    lightskyblue: "#87cefa",
+    lightslategray: "#778899",
+    lightslategrey: "#778899",
+    lightsteelblue: "#b0c4de",
+    lightyellow: "#ffffe0",
+    limegreen: "#32cd32",
+    linen: "#faf0e6",
+    magenta: "#ff00ff",
+    mediumaquamarine: "#66cdaa",
+    mediumblue: "#0000cd",
+    mediumorchid: "#ba55d3",
+    mediumpurple: "#9370db",
+    mediumseagreen: "#3cb371",
+    mediumslateblue: "#7b68ee",
+    mediumspringgreen: "#00fa9a",
+    mediumturquoise: "#48d1cc",
+    mediumvioletred: "#c71585",
+    midnightblue: "#191970",
+    mintcream: "#f5fffa",
+    mistyrose: "#ffe4e1",
+    moccasin: "#ffe4b5",
+    navajowhite: "#ffdead",
+    oldlace: "#fdf5e6",
+    olivedrab: "#6b8e23",
+    orangered: "#ff4500",
+    orchid: "#da70d6",
+    palegoldenrod: "#eee8aa",
+    palegreen: "#98fb98",
+    paleturquoise: "#afeeee",
+    palevioletred: "#db7093",
+    papayawhip: "#ffefd5",
+    peachpuff: "#ffdab9",
+    peru: "#cd853f",
+    pink: "#ffc0cb",
+    plum: "#dda0dd",
+    powderblue: "#b0e0e6",
+    rosybrown: "#bc8f8f",
+    royalblue: "#4169e1",
+    saddlebrown: "#8b4513",
+    salmon: "#fa8072",
+    sandybrown: "#f4a460",
+    seagreen: "#2e8b57",
+    seashell: "#fff5ee",
+    sienna: "#a0522d",
+    skyblue: "#87ceeb",
+    slateblue: "#6a5acd",
+    slategray: "#708090",
+    slategrey: "#708090",
+    snow: "#fffafa",
+    springgreen: "#00ff7f",
+    steelblue: "#4682b4",
+    tan: "#d2b48c",
+    thistle: "#d8bfd8",
+    tomato: "#ff6347",
+    turquoise: "#40e0d0",
+    violet: "#ee82ee",
+    wheat: "#f5deb3",
+    yellowgreen: "#9acd32"
+  };
+
+  return colorMap[clean] || color;
+}
+
+async function applyTerminalBackground(entry, color) {
+  if (!isDemoModeActive()) return;
+  if (!color) return;
+  const resolved = resolveColor(color);
+  if (!resolved) return;
+  try {
+    const cfg = vscode.workspace.getConfiguration();
+    const T = getConfigurationTarget();
+    if (entry && entry.prevColorCustomizations === undefined) {
+      const colorsInsp = cfg.inspect("workbench.colorCustomizations");
+      entry.prevColorCustomizations = getInspectValue(colorsInsp, T);
+    }
+    const current = cfg.get("workbench.colorCustomizations") || {};
+    const updated = { ...current };
+    if (resolved === "default") {
+      delete updated["terminal.background"];
+      delete updated["panel.background"];
+    } else {
+      updated["terminal.background"] = resolved;
+      updated["panel.background"] = resolved;
+    }
+    await cfg.update("workbench.colorCustomizations", updated, T);
+    if (entry) {
+      entry.termBgApplied = true;
+    }
+  } catch (err) {
+    // ignore
+  }
 }
 
 const RUN_DIR = ".rockdemo-run"; // gitignored scratch root inside a scenario
@@ -1599,6 +1884,14 @@ function postForegroundDone(entry, stepId) {
   if (!entry.disposed && entry.panel) {
     entry.panel.webview.postMessage({ type: "foregroundDone", step: stepId });
   }
+  if (stepId === "intro" && entry.terminals && entry.terminals.length) {
+    const first = entry.terminals[0];
+    setTimeout(() => {
+      if (first && first.terminal) {
+        first.terminal.show();
+      }
+    }, 100);
+  }
 }
 
 /**
@@ -1818,6 +2111,9 @@ function mapContainerPath(entry, containerPath) {
  * would keep whatever state the previous run left them in.)
  */
 function restartScenario(entry) {
+  if (entry.demoTermApplied || entry.termBgApplied) {
+    applyTerminalBackground(entry, "default");
+  }
   disposeEntryTerminals(entry);
   entry.startPromise = startNodes(entry);
   buildScenario(entry.doc, entry.nodes).then((data) => {
@@ -1850,7 +2146,7 @@ class ScenarioCodeLensProvider {
           new vscode.CodeLens(range, {
             title: block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal",
             command: "rockdemo.exec",
-            arguments: [block.content, { interrupt: !!block.interrupt }],
+            arguments: [block.content, { interrupt: !!block.interrupt, background: block.background, target: block.target }],
           })
         );
         lenses.push(
@@ -1967,15 +2263,20 @@ function isHtmlBlockLine(line) {
  */
 function inlineCodeHtml(code, anno) {
   const ann = parseAnnotation(anno);
-  const action = ann.present ? ann.action : "copy"; // default: copyable
+  let action = ann.present ? ann.action : "copy"; // default: copyable
+  if (!action && (ann.background || ann.target)) {
+    action = "exec";
+  }
   const codeHtml = `<code>${escapeHtml(code)}</code>`;
   const cmd = encodeURIComponent(code);
   if (action === "exec") {
     const intr = ann.interrupt ? ` data-interrupt="1"` : "";
+    const bgAttr = ann.background ? ` data-background="${escapeHtml(ann.background)}"` : "";
+    const targetAttr = ann.target ? ` data-node-target="${escapeHtml(ann.target)}"` : "";
     const title = ann.interrupt ? "Run (Ctrl+C first)" : "Run in terminal";
     return (
       codeHtml +
-      `<button class="inline-act" title="${title}" data-action="exec" data-cmd="${cmd}"${intr}>▶</button>` +
+      `<button class="inline-act" title="${title}" data-action="exec" data-cmd="${cmd}"${intr}${bgAttr}${targetAttr}>▶</button>` +
       `<button class="inline-act" title="Copy" data-action="copy" data-cmd="${cmd}">📋</button>`
     );
   }
@@ -2050,11 +2351,13 @@ function blockButtons(block, baseStr) {
   const cmd = encodeURIComponent(block.content);
   if (block.action === "exec") {
     const intr = block.interrupt ? ` data-interrupt="1"` : "";
+    const bgAttr = block.background ? ` data-background="${escapeHtml(block.background)}"` : "";
+    const targetAttr = block.target ? ` data-node-target="${escapeHtml(block.target)}"` : "";
     const runLabel = block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal";
     return (
       `<pre class="demo-cmd"><code>${escapeHtml(block.content)}</code></pre>` +
       `<div class="demo-actions">` +
-      `<button data-action="exec" data-cmd="${cmd}"${intr}>${runLabel}</button>` +
+      `<button data-action="exec" data-cmd="${cmd}"${intr}${bgAttr}${targetAttr}>${runLabel}</button>` +
       `<button data-action="copy" data-cmd="${cmd}">📋 Copy</button>` +
       `</div>`
     );
@@ -2208,7 +2511,7 @@ function renderMarkdownToHtml(text, baseStr, webview) {
         if (action && body.trim().length > 0) {
           // Actionable block → buttons.
           out.push(
-            blockButtons({ action, lang, content: body, interrupt: ann.interrupt }, baseStr)
+            blockButtons({ action, lang, content: body, interrupt: ann.interrupt, background: ann.background, target: ann.target }, baseStr)
           );
         } else if (body.trim().length > 0) {
           // Non-actionable fence → display it as a (optionally highlighted) code
@@ -2401,6 +2704,8 @@ const CLIENT_SCRIPT = `
       file: btn.dataset.file ? decodeURIComponent(btn.dataset.file) : undefined,
       base: btn.dataset.base ? decodeURIComponent(btn.dataset.base) : undefined,
       interrupt: btn.dataset.interrupt === "1",
+      background: btn.dataset.background || undefined,
+      target: btn.dataset.nodeTarget || undefined,
     });
   });
   // Verification result from the extension: reveal NEXT on success, or flash
@@ -2744,20 +3049,40 @@ function demoHtml(document, webview) {
  * directs subsequent commands there), else the first node. Demo mode creates a
  * single terminal lazily on first use.
  */
-function sendToEntryTerminal(entry, cmd, interrupt) {
-  if (!entry.terminals || entry.terminals.length === 0) {
-    entry.terminals = [
-      { name: "rockDemo", terminal: vscode.window.createTerminal("rockDemo"), containerName: null },
-    ];
+function sendToEntryTerminal(entry, cmd, interrupt, background, target) {
+  try {
+    if (!entry.terminals || entry.terminals.length === 0) {
+      entry.terminals = [
+        { name: "rockDemo", terminal: vscode.window.createTerminal("rockDemo"), containerName: null },
+      ];
+    }
+    let rec;
+    if (target) {
+      rec = pickHost(entry, target);
+    }
+    if (!rec) {
+      const active = vscode.window.activeTerminal;
+      rec = entry.terminals.find((r) => r.terminal === active) || entry.terminals[0];
+    }
+    if (!rec) {
+      const fallbackTerm = vscode.window.activeTerminal || vscode.window.createTerminal("rockDemo");
+      rec = { name: "rockDemo", terminal: fallbackTerm, containerName: null };
+    }
+    if (rec.terminal) {
+      rec.terminal.show();
+      if (background && entry.demoTermApplied) {
+        applyTerminalBackground(entry, background);
+      }
+      // With {{exec interrupt}}, Ctrl+C first to stop any running foreground process.
+      if (interrupt) sendInterruptThen(rec.terminal, cmd);
+      // `true` appends a newline — i.e. types the command AND presses Enter.
+      else rec.terminal.sendText(cmd, true);
+    } else {
+      vscode.window.showErrorMessage(`rockDemo: No active terminal session could be resolved for target "${target || "default"}"`);
+    }
+  } catch (err) {
+    vscode.window.showErrorMessage(`rockDemo: sendToEntryTerminal failed with error: ${err.message}`);
   }
-  const active = vscode.window.activeTerminal;
-  const rec =
-    entry.terminals.find((r) => r.terminal === active) || entry.terminals[0];
-  rec.terminal.show();
-  // With {{exec interrupt}}, Ctrl+C first to stop any running foreground process.
-  if (interrupt) sendInterruptThen(rec.terminal, cmd);
-  // `true` appends a newline — i.e. types the command AND presses Enter.
-  else rec.terminal.sendText(cmd, true);
 }
 
 // Appearance forced while a scenario runs in DEMO (projection) mode. Rather than
@@ -2785,14 +3110,19 @@ const DEMO_TERMINAL_COLORS = {
 async function applyDemoTerminalStyle(entry) {
   if (entry.demoTermApplied) return;
   const cfg = vscode.workspace.getConfiguration();
-  const T = vscode.ConfigurationTarget.Workspace;
+  const T = getConfigurationTarget();
   try {
     const colorsInsp = cfg.inspect("workbench.colorCustomizations");
-    entry.prevColorCustomizations = colorsInsp && colorsInsp.workspaceValue;
-    entry.prevTerminalFontSize = (cfg.inspect("terminal.integrated.fontSize") || {})
-      .workspaceValue;
-    entry.prevColorTheme = (cfg.inspect("workbench.colorTheme") || {}).workspaceValue;
-    entry.prevStickyScroll = (cfg.inspect("terminal.integrated.stickyScroll.enabled") || {}).workspaceValue;
+    entry.prevColorCustomizations = getInspectValue(colorsInsp, T);
+    entry.prevTerminalFontSize = getInspectValue(
+      cfg.inspect("terminal.integrated.fontSize"),
+      T
+    );
+    entry.prevColorTheme = getInspectValue(cfg.inspect("workbench.colorTheme"), T);
+    entry.prevStickyScroll = getInspectValue(
+      cfg.inspect("terminal.integrated.stickyScroll.enabled"),
+      T
+    );
     const merged = Object.assign({}, entry.prevColorCustomizations || {}, DEMO_TERMINAL_COLORS);
     await cfg.update("workbench.colorCustomizations", merged, T);
     // Switch to a light theme so opened files render light with readable tokens.
@@ -2833,7 +3163,7 @@ async function setDemoTerminalFontSize(entry, px) {
       .update(
         "terminal.integrated.fontSize",
         px,
-        vscode.ConfigurationTarget.Workspace
+        getConfigurationTarget()
       );
   } catch (err) {
     /* non-fatal: the webview font still changed */
@@ -2842,26 +3172,33 @@ async function setDemoTerminalFontSize(entry, px) {
 
 /** Undo applyDemoTerminalStyle, restoring the exact previous workspace values. */
 async function restoreDemoTerminalStyle(entry) {
-  if (!entry.demoTermApplied) return;
+  if (!entry.demoTermApplied && !entry.termBgApplied) return;
   const cfg = vscode.workspace.getConfiguration();
-  const T = vscode.ConfigurationTarget.Workspace;
+  const T = getConfigurationTarget();
+  const demoApplied = entry.demoTermApplied;
+  const bgApplied = entry.termBgApplied;
   entry.demoTermApplied = false; // clear first so a failed restore can't loop
+  entry.termBgApplied = false;
   try {
-    await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
-    await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
-    await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
-    await cfg.update("terminal.integrated.stickyScroll.enabled", entry.prevStickyScroll, T);
-    // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
-    // on demo enter, depending on the configuration.
-    const rdCfg = vscode.workspace.getConfiguration("rockdemo");
-    if (rdCfg.get("restoreSidebar", true)) {
-      await vscode.commands.executeCommand("workbench.action.focusSideBar");
+    if (demoApplied || bgApplied) {
+      await cfg.update("workbench.colorCustomizations", entry.prevColorCustomizations, T);
     }
-    if (rdCfg.get("restorePanel", true)) {
-      await vscode.commands.executeCommand("workbench.action.togglePanel");
-    }
-    if (rdCfg.get("restoreAgentPanel", true)) {
-      await vscode.commands.executeCommand("workbench.action.focusAuxiliaryBar");
+    if (demoApplied) {
+      await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
+      await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
+      await cfg.update("terminal.integrated.stickyScroll.enabled", entry.prevStickyScroll, T);
+      // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
+      // on demo enter, depending on the configuration.
+      const rdCfg = vscode.workspace.getConfiguration("rockdemo");
+      if (rdCfg.get("restoreSidebar", true)) {
+        await vscode.commands.executeCommand("workbench.action.focusSideBar");
+      }
+      if (rdCfg.get("restorePanel", true)) {
+        await vscode.commands.executeCommand("workbench.action.togglePanel");
+      }
+      if (rdCfg.get("restoreAgentPanel", true)) {
+        await vscode.commands.executeCommand("workbench.action.focusAuxiliaryBar");
+      }
     }
   } catch (err) {
     vscode.window.showWarningMessage(
@@ -2880,7 +3217,7 @@ function makeMessageHandler(entry) {
     if (!skipWait && entry.startPromise) {
       await entry.startPromise;
     }
-    if (msg.action === "exec") sendToEntryTerminal(entry, msg.cmd, msg.interrupt);
+    if (msg.action === "exec") sendToEntryTerminal(entry, msg.cmd, msg.interrupt, msg.background, msg.target);
     else if (msg.action === "copy") runCopy(msg.cmd);
     else if (msg.action === "open") {
       // A container-absolute path opens the host copy bind-mounted there;
@@ -2946,6 +3283,7 @@ function openDemoPanel(document, panels) {
       }
     );
     entry = { panel, terminals: [] };
+    panel.entry = entry;
     panels.set(key, entry);
     trackActivePanel(panel);
     panel.webview.onDidReceiveMessage(makeMessageHandler(entry));
@@ -2953,6 +3291,7 @@ function openDemoPanel(document, panels) {
     panel.onDidDispose(() => {
       disposeEntryTerminals(entry);
       panels.delete(key);
+      if (activeDemoEntry === entry) activeDemoEntry = null;
     });
   }
 
@@ -3193,6 +3532,7 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
       fgDone: new Set(),
       startPromise: null,
     };
+    panel.entry = entry;
     scenarioPanels.set(key, entry);
     trackActivePanel(panel);
     runningScenarioEntry = entry; // target for "new terminal on node"
