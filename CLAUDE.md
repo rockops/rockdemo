@@ -97,6 +97,7 @@ before changing parsing or orchestration behaviour, and keep it in sync when you
 The full process lives in **[BUILD.md](BUILD.md)**. Do not run `vsce publish` by hand.
 The essentials:
 
+- **Do not create, merge a PR, or trigger a release until the USER explicitly asks for it.**
 - **A PR/push builds; a tag publishes.** CI (`ci.yml`) only packages the `.vsix`.
   The Release workflow (`release.yml`) publishes only when a `vX.Y.Z` tag is pushed,
   and fails if the tag doesn't equal `package.json`'s `version`.
