@@ -26,6 +26,7 @@ RUN touch /etc/modules \
       vim \
       nano \
       tree \
+      iputils-ping \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root

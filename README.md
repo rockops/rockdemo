@@ -232,6 +232,12 @@ keeps a **persistent image cache** so you only pay that cost once:
 The cache is per-backend, so different scenarios that use the same environment
 share it automatically.
 
+### Persistent `/rockdemo` cache volume
+
+In addition to the nested runtime image caches, rockDemo mounts an extra persistent cache volume at `/rockdemo` inside all scenario containers. This volume is unique per container (so multiple nodes in a backend get their own distinct volumes) and persists data across stops and restarts for warm state preservation.
+
+When the image cache is cleared (via the actions below), the `/rockdemo` cache volumes are also automatically deleted.
+
 ### Clearing the cache
 
 Clearing is always deliberate — do it to reclaim disk or force a fresh pull:

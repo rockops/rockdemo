@@ -486,8 +486,10 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // network calls work behind a corporate proxy. The values are expanded by this
   // terminal's shell (not the extension host) — see proxyEnvArgs for why.
   const proxy = proxyArgs ? `${proxyArgs} ` : "";
+  const cacheVolName = nestedCacheVolumeFor(name, imageid, "rockdemo");
   const runArgs =
     `--label ${ROCKDEMO_LABEL} --name ${containerName} --hostname ${hostname} ` +
+    `--mount type=volume,src=${cacheVolName},dst=/rockdemo,volume-label=${ROCKDEMO_CACHE_LABEL} ` +
     `${priv}${netArgs}${pub ? pub + " " : ""}${proxy}${vol} ${imageid}`;
   const launch = systemd
     ? `docker run -d --rm --tmpfs /run --tmpfs /run/lock ${runArgs} /sbin/init >/dev/null 2>&1 && ` +
