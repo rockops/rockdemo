@@ -104,4 +104,4 @@ The essentials:
 - **Channel is chosen by minor-version parity**: even minor → stable, odd minor →
   pre-release. You never pass `--pre-release` yourself.
 - `main` is always releasable; all work goes through a PR with green CI.
-- Prefer the **`/open-pr`** and **`/release`** skills, which encode this workflow.
+- Prefer the **`/open-pr`**, **`/release`**, and **`/generate-plugin-locally`** skills, which encode this workflow.

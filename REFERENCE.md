@@ -25,6 +25,13 @@ block:
 As in Killercoda, **`bash` / `sh` / `shell` blocks are runnable by default** —
 they get the `exec` buttons even without an explicit `{{exec}}` annotation.
 
+### Executable block parameters
+
+For executable (`exec`) blocks, you can configure additional options inside the annotation (separated by spaces, parameter values can be optionally quoted):
+
+- **`hidden=true`** — Hides the code block itself (`<pre>`) in the preview/webview, rendering only the run button (default is `false`).
+- **`text="Custom Label"`** — Overrides the text on the terminal button (default is `"Run in terminal"` or `"Run"` if `interrupt` is active).
+
 ### Inline code (single backticks)
 
 Inside the demo/scenario webview, **inline `` `code` `` spans are copyable by
@@ -710,6 +717,10 @@ copy-only command (e.g. destructive/interactive)
 ```text
 ../path/to/file.py
 ```{{open}}
+
+```bash
+echo "hidden command with custom label"
+```{{exec hidden=true text="Run setup script"}}
 ````
 
 Notes:
