@@ -36,6 +36,7 @@ RUN touch /etc/modules \
       systemd \
       systemd-sysv \
       iproute2 \
+      make \
       iputils-ping \
  && rm -rf /var/lib/apt/lists/*
 
