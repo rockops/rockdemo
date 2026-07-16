@@ -403,6 +403,14 @@ async function clearTerminalWhenReady(entry, rec, node) {
   // If there is a backend foreground script, fgUngate handles the clearing when it finishes.
   if (node.foreground) return;
 
+  // If this node runs the intro foreground script, fgUngate handles the clearing when it finishes.
+  const details = (entry.scenario && entry.scenario.details) || {};
+  const intro = details.intro || {};
+  if (intro.foreground) {
+    const targetNode = intro.host ? findNode(entry, intro.host) : (entry.nodes && entry.nodes[0]);
+    if (targetNode && targetNode.name === node.name) return;
+  }
+
   // Otherwise, wait for the container shell to be ready, then clear.
   if (rec.ready) await rec.ready;
   if (entry.disposed) return;
@@ -447,12 +455,18 @@ async function clearTerminalWhenReady(entry, rec, node) {
  * editor pane in that column (see startNodes).
  * Returns a record: { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location, proxyArgs) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location, proxyArgs, color, tabname) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
   // `location: { viewColumn }` opens this terminal as an editor in that column.
-  const term = vscode.window.createTerminal({ name, location });
+  const termName = tabname || name;
+  const termOpts = { name: termName, location };
+  if (color) {
+    const themeColor = getTerminalThemeColor(color);
+    if (themeColor) termOpts.color = themeColor;
+  }
+  const term = vscode.window.createTerminal(termOpts);
   // Creating with a `viewColumn` already opens the terminal in its target
   // editor column. Calling show() synchronously here would race that placement —
   // for a column that doesn't exist yet, show() reveals a GHOST copy in the
@@ -623,6 +637,8 @@ function nodesFromConfig(nodes, layout) {
     background: n.background || null,
     foreground: n.foreground || null,
     split: splitDirection(i, layout, n.split),
+    color: n.color || null,
+    tabname: n.tabname || n.tabName || null,
   }));
 }
 
@@ -869,17 +885,29 @@ async function startNodes(entry) {
   }
 
   const terminals = [];
+  const DEFAULT_TERMINAL_COLORS = ["blue", "green", "yellow", "magenta", "cyan", "red"];
   for (let idx = 0; idx < filteredNodes.length; idx++) {
     const n = filteredNodes[idx];
     let rec;
     const location = { viewColumn: nodeLocations[idx] };
+    let color = n.color;
+    if (!color && filteredNodes.length > 1) {
+      color = DEFAULT_TERMINAL_COLORS[idx % DEFAULT_TERMINAL_COLORS.length];
+    }
 
     if (n.connect) {
       const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect));
       const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
       const targetContainer = targetNode ? containerNameFor(targetNode.name) : containerNameFor(n.connect);
       const shell = n.cmd || (targetNode && targetNode.cmd) || "sh";
-      const term = vscode.window.createTerminal({ name: n.name, location });
+      
+      const termName = n.tabname || n.tabName || n.name;
+      const termOpts = { name: termName, location };
+      if (color) {
+        const themeColor = getTerminalThemeColor(color);
+        if (themeColor) termOpts.color = themeColor;
+      }
+      const term = vscode.window.createTerminal(termOpts);
 
       const launchLine = (
         `until [ "$(docker inspect -f '{{.State.Running}}' ${targetContainer} 2>/dev/null)" = "true" ]; do sleep 0.5; done; ` +
@@ -919,7 +947,7 @@ async function startNodes(entry) {
       const ports = entry.trafficPorts.get(n.name) || [];
 
       rec = startNamedContainer(
-        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs, color, n.tabname || n.tabName
       );
       clearTerminalWhenReady(entry, rec, n);
     }
@@ -1906,15 +1934,27 @@ function fgUngate(entry, screen, token) {
   const set = entry.fgPending && entry.fgPending.get(screen);
   if (set) set.delete(token);
 
-  // If a backend foreground script just finished, clear the terminal
+  // Clear the terminal when a startup foreground script finishes (either backend-level or intro step-level)
+  let clearRec = null;
   if (token && token.startsWith("node:")) {
     const nodeName = token.slice("node:".length);
-    const rec = entry.terminals && entry.terminals.find((r) => r.name === nodeName);
-    if (rec && rec.terminal) {
-      const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
-      if (clearPref) {
-        rec.terminal.sendText("clear && printf '\\033[3J'", true);
-      }
+    clearRec = entry.terminals && entry.terminals.find((r) => r.name === nodeName);
+  } else if (screen === "intro" && token === "self") {
+    const details = (entry.scenario && entry.scenario.details) || {};
+    const intro = details.intro || {};
+    clearRec = pickHost(entry, intro.host);
+  }
+
+  if (clearRec && clearRec.terminal) {
+    const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
+    if (clearPref) {
+      // Wait a brief moment for the container shell prompt to fully print and stabilize
+      // after the script finishes, ensuring the clear command isn't sent too early.
+      setTimeout(() => {
+        if (!entry.disposed && clearRec.terminal) {
+          clearRec.terminal.sendText("clear && printf '\\033[3J'", true);
+        }
+      }, 500);
     }
   }
 
@@ -3865,7 +3905,8 @@ function notifyCacheCleared({ removed, inUse, removedImages = 0 }) {
  * and the `+` dropdown profile, whose provider gives us no terminal handle).
  */
 function nodeTerminalOptions(node) {
-  return { name: node.name, env: { ROCKDEMO_NODE_TERMINAL: node.name } };
+  const termName = node.tabname || node.tabName || node.name;
+  return { name: termName, env: { ROCKDEMO_NODE_TERMINAL: node.name } };
 }
 
 /**
@@ -4087,5 +4128,23 @@ function activate(context) {
 }
 
 function deactivate() {}
+
+/** Map a standard color name or VS Code ThemeColor ID to a ThemeColor. */
+function getTerminalThemeColor(colorStr) {
+  if (!colorStr) return undefined;
+  const lower = colorStr.toLowerCase();
+  const map = {
+    black: "terminal.ansiBlack",
+    red: "terminal.ansiRed",
+    green: "terminal.ansiGreen",
+    yellow: "terminal.ansiYellow",
+    blue: "terminal.ansiBlue",
+    magenta: "terminal.ansiMagenta",
+    cyan: "terminal.ansiCyan",
+    white: "terminal.ansiWhite"
+  };
+  const colorId = map[lower] || colorStr;
+  return new vscode.ThemeColor(colorId);
+}
 
 module.exports = { activate, deactivate };
