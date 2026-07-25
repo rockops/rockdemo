@@ -35,7 +35,7 @@ Runs **only** when a tag matching `v*.*.*` is pushed. It:
 5. creates a **GitHub Release** with the built `.vsix` attached.
 
 Requires the **`VSCE_PAT`** repository secret (Azure DevOps PAT, *Marketplace →
-Manage* scope, *All accessible organizations*).
+Manage* scope, *All accessible organizations*). See [TOKEN.md](TOKEN.md) for step-by-step instructions and token management details.
 
 ---
 
