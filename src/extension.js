@@ -21,25 +21,55 @@ let extensionUri = null;
  * @returns {{ present: boolean, action: string|undefined, interrupt: boolean }}
  */
 function parseAnnotation(raw) {
-  if (raw === undefined) return { present: false, action: undefined, interrupt: false, background: undefined, target: undefined };
-  const parts = raw.trim().split(/\s+/).filter(Boolean);
-  let action = parts[0];
+  if (raw === undefined) {
+    return {
+      present: false,
+      action: undefined,
+      interrupt: false,
+      background: undefined,
+      target: undefined,
+      hidden: false,
+      text: undefined
+    };
+  }
+  let action = undefined;
   let interrupt = false;
   let background = undefined;
   let target = undefined;
-  for (const part of parts) {
-    if (part === "interrupt") {
+  let hidden = false;
+  let text = undefined;
+
+  const regex = /([a-zA-Z0-9_-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\s]*)))?/g;
+  let match;
+  let isFirst = true;
+  while ((match = regex.exec(raw)) !== null) {
+    const name = match[1];
+    const val = match[2] !== undefined ? match[2] : (match[3] !== undefined ? match[3] : match[4]);
+
+    if (isFirst) {
+      action = name;
+      isFirst = false;
+    }
+
+    if (name === "interrupt") {
       interrupt = true;
-    } else if (part.startsWith("background=")) {
-      background = part.split("=")[1];
-    } else if (part.startsWith("target=")) {
-      target = part.split("=")[1];
+    } else if (name === "background") {
+      background = val;
+    } else if (name === "target") {
+      target = val;
+    } else if (name === "hidden") {
+      hidden = (val === "true" || val === undefined);
+    } else if (name === "text") {
+      text = val;
     }
   }
-  if (action && (action.startsWith("background=") || action === "interrupt" || action.startsWith("target="))) {
+
+  const reserved = new Set(["interrupt", "background", "target", "hidden", "text"]);
+  if (action && reserved.has(action)) {
     action = undefined;
   }
-  return { present: true, action, interrupt, background, target };
+
+  return { present: true, action, interrupt, background, target, hidden, text };
 }
 
 /**
@@ -94,7 +124,17 @@ function parseScenario(document) {
 
       const body = content.join("\n");
       if (action && body.trim().length > 0) {
-        blocks.push({ openLine, action, lang, content: body, interrupt: ann.interrupt, background: ann.background, target: ann.target });
+        blocks.push({
+          openLine,
+          action,
+          lang,
+          content: body,
+          interrupt: ann.interrupt,
+          background: ann.background,
+          target: ann.target,
+          hidden: ann.hidden,
+          text: ann.text
+        });
       }
       continue;
     }
@@ -363,6 +403,14 @@ async function clearTerminalWhenReady(entry, rec, node) {
   // If there is a backend foreground script, fgUngate handles the clearing when it finishes.
   if (node.foreground) return;
 
+  // If this node runs the intro foreground script, fgUngate handles the clearing when it finishes.
+  const details = (entry.scenario && entry.scenario.details) || {};
+  const intro = details.intro || {};
+  if (intro.foreground) {
+    const targetNode = intro.host ? findNode(entry, intro.host) : (entry.nodes && entry.nodes[0]);
+    if (targetNode && targetNode.name === node.name) return;
+  }
+
   // Otherwise, wait for the container shell to be ready, then clear.
   if (rec.ready) await rec.ready;
   if (entry.disposed) return;
@@ -407,12 +455,18 @@ async function clearTerminalWhenReady(entry, rec, node) {
  * editor pane in that column (see startNodes).
  * Returns a record: { name, terminal, containerName }.
  */
-function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location, proxyArgs) {
+function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged, systemd, ports, location, proxyArgs, color, tabname) {
   const containerName = containerNameFor(name);
   const hostname = hostnameFor(name);
   const shell = cmd || "sh";
   // `location: { viewColumn }` opens this terminal as an editor in that column.
-  const term = vscode.window.createTerminal({ name, location });
+  const termName = tabname || name;
+  const termOpts = { name: termName, location };
+  if (color) {
+    const themeColor = getTerminalThemeColor(color);
+    if (themeColor) termOpts.color = themeColor;
+  }
+  const term = vscode.window.createTerminal(termOpts);
   // Creating with a `viewColumn` already opens the terminal in its target
   // editor column. Calling show() synchronously here would race that placement —
   // for a column that doesn't exist yet, show() reveals a GHOST copy in the
@@ -583,6 +637,8 @@ function nodesFromConfig(nodes, layout) {
     background: n.background || null,
     foreground: n.foreground || null,
     split: splitDirection(i, layout, n.split),
+    color: n.color || null,
+    tabname: n.tabname || n.tabName || null,
   }));
 }
 
@@ -829,17 +885,29 @@ async function startNodes(entry) {
   }
 
   const terminals = [];
+  const DEFAULT_TERMINAL_COLORS = ["blue", "green", "yellow", "magenta", "cyan", "red"];
   for (let idx = 0; idx < filteredNodes.length; idx++) {
     const n = filteredNodes[idx];
     let rec;
     const location = { viewColumn: nodeLocations[idx] };
+    let color = n.color;
+    if (!color && filteredNodes.length > 1) {
+      color = DEFAULT_TERMINAL_COLORS[idx % DEFAULT_TERMINAL_COLORS.length];
+    }
 
     if (n.connect) {
       const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect));
       const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
       const targetContainer = targetNode ? containerNameFor(targetNode.name) : containerNameFor(n.connect);
       const shell = n.cmd || (targetNode && targetNode.cmd) || "sh";
-      const term = vscode.window.createTerminal({ name: n.name, location });
+      
+      const termName = n.tabname || n.tabName || n.name;
+      const termOpts = { name: termName, location };
+      if (color) {
+        const themeColor = getTerminalThemeColor(color);
+        if (themeColor) termOpts.color = themeColor;
+      }
+      const term = vscode.window.createTerminal(termOpts);
 
       const launchLine = (
         `until [ "$(docker inspect -f '{{.State.Running}}' ${targetContainer} 2>/dev/null)" = "true" ]; do sleep 0.5; done; ` +
@@ -879,7 +947,7 @@ async function startNodes(entry) {
       const ports = entry.trafficPorts.get(n.name) || [];
 
       rec = startNamedContainer(
-        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs
+        n.name, n.imageid, mounts, n.cmd, n.ip, useNet, n.docker, n.systemd, ports, location, proxyArgs, color, n.tabname || n.tabName
       );
       clearTerminalWhenReady(entry, rec, n);
     }
@@ -1866,15 +1934,27 @@ function fgUngate(entry, screen, token) {
   const set = entry.fgPending && entry.fgPending.get(screen);
   if (set) set.delete(token);
 
-  // If a backend foreground script just finished, clear the terminal
+  // Clear the terminal when a startup foreground script finishes (either backend-level or intro step-level)
+  let clearRec = null;
   if (token && token.startsWith("node:")) {
     const nodeName = token.slice("node:".length);
-    const rec = entry.terminals && entry.terminals.find((r) => r.name === nodeName);
-    if (rec && rec.terminal) {
-      const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
-      if (clearPref) {
-        rec.terminal.sendText("clear && printf '\\033[3J'", true);
-      }
+    clearRec = entry.terminals && entry.terminals.find((r) => r.name === nodeName);
+  } else if (screen === "intro" && token === "self") {
+    const details = (entry.scenario && entry.scenario.details) || {};
+    const intro = details.intro || {};
+    clearRec = pickHost(entry, intro.host);
+  }
+
+  if (clearRec && clearRec.terminal) {
+    const clearPref = vscode.workspace.getConfiguration("rockdemo").get("clearTerminalOnReady", true);
+    if (clearPref) {
+      // Wait a brief moment for the container shell prompt to fully print and stabilize
+      // after the script finishes, ensuring the clear command isn't sent too early.
+      setTimeout(() => {
+        if (!entry.disposed && clearRec.terminal) {
+          clearRec.terminal.sendText("clear && printf '\\033[3J'", true);
+        }
+      }, 500);
     }
   }
 
@@ -2146,7 +2226,7 @@ class ScenarioCodeLensProvider {
       if (block.action === "exec") {
         lenses.push(
           new vscode.CodeLens(range, {
-            title: block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal",
+            title: block.text ? `▶ ${block.text}` : (block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal"),
             command: "rockdemo.exec",
             arguments: [block.content, { interrupt: !!block.interrupt, background: block.background, target: block.target }],
           })
@@ -2355,12 +2435,14 @@ function blockButtons(block, baseStr) {
     const intr = block.interrupt ? ` data-interrupt="1"` : "";
     const bgAttr = block.background ? ` data-background="${escapeHtml(block.background)}"` : "";
     const targetAttr = block.target ? ` data-node-target="${escapeHtml(block.target)}"` : "";
-    const runLabel = block.interrupt ? "▶ Run (Ctrl+C first)" : "▶ Run in terminal";
+    const runLabelText = block.text || (block.interrupt ? "Run (Ctrl+C first)" : "Run in terminal");
+    const runLabel = (runLabelText.startsWith("▶") || runLabelText.startsWith("📋") || runLabelText.startsWith("📂")) ? runLabelText : `▶ ${runLabelText}`;
+    const btnStyle = block.hidden ? ` style="border-radius: 6px;"` : "";
     return (
-      `<pre class="demo-cmd"><code>${escapeHtml(block.content)}</code></pre>` +
+      (block.hidden ? "" : `<pre class="demo-cmd"><code>${escapeHtml(block.content)}</code></pre>`) +
       `<div class="demo-actions">` +
-      `<button data-action="exec" data-cmd="${cmd}"${intr}${bgAttr}${targetAttr}>${runLabel}</button>` +
-      `<button data-action="copy" data-cmd="${cmd}">📋 Copy</button>` +
+      `<button data-action="exec" data-cmd="${cmd}"${intr}${bgAttr}${targetAttr}${btnStyle}>${runLabel}</button>` +
+      (block.hidden ? "" : `<button data-action="copy" data-cmd="${cmd}">📋 Copy</button>`) +
       `</div>`
     );
   }
@@ -2513,7 +2595,16 @@ function renderMarkdownToHtml(text, baseStr, webview) {
         if (action && body.trim().length > 0) {
           // Actionable block → buttons.
           out.push(
-            blockButtons({ action, lang, content: body, interrupt: ann.interrupt, background: ann.background, target: ann.target }, baseStr)
+            blockButtons({
+              action,
+              lang,
+              content: body,
+              interrupt: ann.interrupt,
+              background: ann.background,
+              target: ann.target,
+              hidden: ann.hidden,
+              text: ann.text
+            }, baseStr)
           );
         } else if (body.trim().length > 0) {
           // Non-actionable fence → display it as a (optionally highlighted) code
@@ -2658,12 +2749,24 @@ const CLIENT_SCRIPT = `
     forceHljsTheme(on);
     const toggle = document.getElementById("demo-toggle");
     if (toggle) toggle.textContent = on ? "🖥 EXIT DEMO MODE" : "🖥 DEMO MODE";
-    vscode.setState(Object.assign({}, vscode.getState(), { demo: on }));
+    if (!on) {
+      fontPx = null;
+      applyFont();
+    }
+    vscode.setState(Object.assign({}, vscode.getState(), { demo: on, fontPx: fontPx }));
     vscode.postMessage({ nav: "demoMode", on: on, termFont: termFont() });
   }
   // Restore persisted font + demo state after a reload/RESTART (fresh HTML).
   applyFont();
   if (savedState.demo) setDemo(true);
+  if (savedState.executedIndices) {
+    const execButtons = Array.from(document.querySelectorAll('button[data-action="exec"]'));
+    savedState.executedIndices.forEach((idx) => {
+      if (execButtons[idx]) {
+        execButtons[idx].classList.add("executed");
+      }
+    });
+  }
   // Fire for the initially-active section (the intro) on load.
   const initial = sections.find((s) => s.classList.contains("active"));
   if (initial) enter(initial.dataset.step);
@@ -2686,8 +2789,10 @@ const CLIENT_SCRIPT = `
       } else if (nav.dataset.nav === "restart") {
         // The extension relaunches the containers and rebuilds the webview HTML
         // from scratch (resetting every gate), so we don't navigate here.
+        vscode.setState(Object.assign({}, vscode.getState(), { executedIndices: [] }));
         vscode.postMessage({ nav: "restart" });
       } else if (nav.dataset.nav === "close" || nav.dataset.nav === "closeClear") {
+        vscode.setState(Object.assign({}, vscode.getState(), { executedIndices: [] }));
         vscode.postMessage({ nav: nav.dataset.nav });
       } else if (nav.dataset.nav === "verify") {
         nav.disabled = true;
@@ -2700,6 +2805,19 @@ const CLIENT_SCRIPT = `
     }
     const btn = e.target.closest("button[data-action]");
     if (!btn) return;
+    if (btn.dataset.action === "exec") {
+      btn.classList.add("executed");
+      const execButtons = Array.from(document.querySelectorAll('button[data-action="exec"]'));
+      const idx = execButtons.indexOf(btn);
+      if (idx !== -1) {
+        const state = vscode.getState() || {};
+        const executed = state.executedIndices || [];
+        if (!executed.includes(idx)) {
+          executed.push(idx);
+          vscode.setState(Object.assign({}, state, { executedIndices: executed }));
+        }
+      }
+    }
     vscode.postMessage({
       action: btn.dataset.action,
       cmd: btn.dataset.cmd ? decodeURIComponent(btn.dataset.cmd) : undefined,
@@ -2939,6 +3057,16 @@ ${hljsHead}
     background: var(--vscode-button-background);
   }
   .demo-actions button:hover { background: var(--vscode-button-hoverBackground); }
+  .demo-actions button[data-action="exec"].executed,
+  .inline-act[data-action="exec"].executed {
+    background: var(--vscode-inputValidation-errorBackground, #a1260d);
+    color: var(--vscode-inputValidation-errorForeground, #ffffff);
+  }
+  .demo-actions button[data-action="exec"].executed:hover,
+  .inline-act[data-action="exec"].executed:hover {
+    background: var(--vscode-inputValidation-errorBackground, #a1260d);
+    filter: brightness(1.2);
+  }
   .demo-actions button[data-action="copy"],
   .demo-actions button[data-action="open"] {
     color: var(--vscode-button-secondaryForeground);
@@ -3120,6 +3248,10 @@ async function applyDemoTerminalStyle(entry) {
       cfg.inspect("terminal.integrated.fontSize"),
       T
     );
+    entry.prevEditorFontSize = getInspectValue(
+      cfg.inspect("editor.fontSize"),
+      T
+    );
     entry.prevColorTheme = getInspectValue(cfg.inspect("workbench.colorTheme"), T);
     entry.prevStickyScroll = getInspectValue(
       cfg.inspect("terminal.integrated.stickyScroll.enabled"),
@@ -3133,6 +3265,7 @@ async function applyDemoTerminalStyle(entry) {
     await cfg.update("workbench.colorTheme", lightTheme, T);
     const fontSize = entry.demoTermFontSize || DEMO_TERMINAL_FONT_SIZE;
     await cfg.update("terminal.integrated.fontSize", fontSize, T);
+    await cfg.update("editor.fontSize", fontSize, T);
     await cfg.update("terminal.integrated.stickyScroll.enabled", false, T);
     // Clean projection layout: collapse the file-explorer side bar, the
     // bottom panel, and the agent panel (auxiliary bar) so only the scenario instructions
@@ -3160,13 +3293,10 @@ async function setDemoTerminalFontSize(entry, px) {
   entry.demoTermFontSize = px;
   if (!entry.demoTermApplied) return;
   try {
-    await vscode.workspace
-      .getConfiguration()
-      .update(
-        "terminal.integrated.fontSize",
-        px,
-        getConfigurationTarget()
-      );
+    const cfg = vscode.workspace.getConfiguration();
+    const T = getConfigurationTarget();
+    await cfg.update("terminal.integrated.fontSize", px, T);
+    await cfg.update("editor.fontSize", px, T);
   } catch (err) {
     /* non-fatal: the webview font still changed */
   }
@@ -3187,6 +3317,7 @@ async function restoreDemoTerminalStyle(entry) {
     }
     if (demoApplied) {
       await cfg.update("terminal.integrated.fontSize", entry.prevTerminalFontSize, T);
+      await cfg.update("editor.fontSize", entry.prevEditorFontSize, T);
       await cfg.update("workbench.colorTheme", entry.prevColorTheme, T);
       await cfg.update("terminal.integrated.stickyScroll.enabled", entry.prevStickyScroll, T);
       // Re-reveal the side bar, bottom panel, and agent panel (auxiliary bar) collapsed
@@ -3774,7 +3905,8 @@ function notifyCacheCleared({ removed, inUse, removedImages = 0 }) {
  * and the `+` dropdown profile, whose provider gives us no terminal handle).
  */
 function nodeTerminalOptions(node) {
-  return { name: node.name, env: { ROCKDEMO_NODE_TERMINAL: node.name } };
+  const termName = node.tabname || node.tabName || node.name;
+  return { name: termName, env: { ROCKDEMO_NODE_TERMINAL: node.name } };
 }
 
 /**
@@ -3996,5 +4128,23 @@ function activate(context) {
 }
 
 function deactivate() {}
+
+/** Map a standard color name or VS Code ThemeColor ID to a ThemeColor. */
+function getTerminalThemeColor(colorStr) {
+  if (!colorStr) return undefined;
+  const lower = colorStr.toLowerCase();
+  const map = {
+    black: "terminal.ansiBlack",
+    red: "terminal.ansiRed",
+    green: "terminal.ansiGreen",
+    yellow: "terminal.ansiYellow",
+    blue: "terminal.ansiBlue",
+    magenta: "terminal.ansiMagenta",
+    cyan: "terminal.ansiCyan",
+    white: "terminal.ansiWhite"
+  };
+  const colorId = map[lower] || colorStr;
+  return new vscode.ThemeColor(colorId);
+}
 
 module.exports = { activate, deactivate };

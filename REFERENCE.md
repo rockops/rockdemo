@@ -25,6 +25,13 @@ block:
 As in Killercoda, **`bash` / `sh` / `shell` blocks are runnable by default** —
 they get the `exec` buttons even without an explicit `{{exec}}` annotation.
 
+### Executable block parameters
+
+For executable (`exec`) blocks, you can configure additional options inside the annotation (separated by spaces, parameter values can be optionally quoted):
+
+- **`hidden=true`** — Hides the code block itself (`<pre>`) in the preview/webview, rendering only the run button (default is `false`).
+- **`text="Custom Label"`** — Overrides the text on the terminal button (default is `"Run in terminal"` or `"Run"` if `interrupt` is active).
+
 ### Inline code (single backticks)
 
 Inside the demo/scenario webview, **inline `` `code` `` spans are copyable by
@@ -226,6 +233,8 @@ prompts for the node rather than one entry per live node.)*
 | `docker` | `true` → run the container `--privileged` and start an in-container Docker daemon (Docker-in-Docker). (Same as `privileged`). |
 | `privileged` | `true` → run the container `--privileged` (needed for nesting, network namespaces, etc.). (Same as `docker`). |
 | `split` | Optional. Splits this node's terminal from the previous node's into its own **pane**. Accepts a direction: `"right"` (a pane **beside**, side-by-side) or `"down"` (a pane **stacked below**). `true` means `"right"`. A node without `split` opens beside as a new column too — the difference is that a `"down"` node stacks under whichever column is current. The first node never splits (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets a default for every node but the first: `"split"`/`"columns"` → `"right"`, `"rows"` → `"down"`. The panes open in the editor area and form a real grid shaped by this direction. |
+| `color` | Optional. Sets the terminal tab / icon color to help identify this node. Accepts standard color names: `"red"`, `"orange"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`, `"magenta"`, `"cyan"`, `"white"`, `"black"`, or any VS Code `ThemeColor` ID (e.g. `"terminal.ansiBrightGreen"`). |
+| `tabname` | Optional. Sets a custom display name for the terminal tab in VS Code, without affecting the node's hostname, container name, or script execution references (which still use `name`). (Can also be specified as `tabName`). |
 | `background` | Optional. A **script file** (path relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
 | `foreground` | Optional. A **script file** (path relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
 
@@ -710,6 +719,10 @@ copy-only command (e.g. destructive/interactive)
 ```text
 ../path/to/file.py
 ```{{open}}
+
+```bash
+echo "hidden command with custom label"
+```{{exec hidden=true text="Run setup script"}}
 ````
 
 Notes:

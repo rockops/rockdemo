@@ -54,3 +54,11 @@ bind-mounted there, so edits are live inside the container.
 ```text
 /var/killercoda/solution/solution1/first.txt
 ```{{open}}
+
+```bash
+echo "I am host3"
+```{{exec target=host3 text="Custom label"}}
+
+```bash
+echo "I am host3"
+```{{exec target=host3 hidden=true text="Run hidden command"}}
