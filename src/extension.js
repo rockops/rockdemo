@@ -611,11 +611,11 @@ function loadBackends() {
  * direction shapes the editor-pane grid (see startNodes).
  */
 function splitDirection(i, layout, raw) {
-  if (i === 0) return false;
   if (raw === "down") return "down";
   if (raw === "right" || raw === true) return "right";
   if (raw === "false" || raw === false || raw === "none") return false;
   if (raw) return "right"; // any other truthy value → default direction
+  if (i === 0) return false;
   if (layout === "rows") return "down";
   if (layout === "split" || layout === "columns") return "right";
   return false;
@@ -822,13 +822,14 @@ async function startNodes(entry) {
   // Pre-calculate editor columns and layout grid groups
   const filteredNodes = entry.nodes.filter((n) => n.imageid || n.connect);
   const nodeLocations = filteredNodes.map((n, idx) => {
+    const effectiveSplit = n.split || (idx > 0 && filteredNodes[idx - 1].split);
     if (idx === 0) {
       editorCol += 1;
       columns.push([editorCol]);
-    } else if (n.split === "down" && columns.length) {
+    } else if (effectiveSplit === "down" && columns.length) {
       editorCol += 1;
       columns[columns.length - 1].push(editorCol);
-    } else if (n.split === "right") {
+    } else if (effectiveSplit === "right") {
       editorCol += 1;
       columns.push([editorCol]);
     } // if split is false/omitted, it stays in the current editorCol and columns remains unchanged
@@ -954,6 +955,18 @@ async function startNodes(entry) {
     terminals.push(rec);
   }
   entry.terminals = terminals;
+  for (const rec of terminals) {
+    if (!rec.mounts || !rec.mounts.length) {
+      const n = entry.nodes.find((x) => x.name === rec.name);
+      if (n && n.connect) {
+        const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect));
+        const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
+        if (targetRec && targetRec.mounts) {
+          rec.mounts = targetRec.mounts;
+        }
+      }
+    }
+  }
   // Where focus lands once everything has opened. VS Code makes the
   // most-recently-created terminal the active editor, and that selection is
   // applied asynchronously — so anything we do synchronously loses the race.
