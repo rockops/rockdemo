@@ -54,6 +54,12 @@
   "backendExtended": {
     "nodes": [
       {
+        "name": "host3",
+        "connect": "host2",
+        "split": "down",
+        "tabname": "TAB3"
+      },
+      {
         "name": "host1",
         "imageid": "alpine",
         "cmd": "sh",
@@ -69,12 +75,6 @@
         "ip": "172.30.2.2",
         "privileged": true,
         "tabname": "TAB2"
-      },
-      {
-        "name": "host3",
-        "connect": "host2",
-        "split": "down",
-        "tabname": "TAB3"
       }
     ]
   }

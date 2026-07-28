@@ -407,7 +407,7 @@ async function clearTerminalWhenReady(entry, rec, node) {
   const details = (entry.scenario && entry.scenario.details) || {};
   const intro = details.intro || {};
   if (intro.foreground) {
-    const targetNode = intro.host ? findNode(entry, intro.host) : (entry.nodes && entry.nodes[0]);
+    const targetNode = intro.host ? findNode(entry, intro.host) : ((entry.nodes || []).find((n) => !n.connect) || (entry.nodes && entry.nodes[0]));
     if (targetNode && targetNode.name === node.name) return;
   }
 
@@ -415,7 +415,7 @@ async function clearTerminalWhenReady(entry, rec, node) {
   if (rec.ready) await rec.ready;
   if (entry.disposed) return;
 
-  const targetNode = node.connect ? entry.nodes.find((x, idx2) => nodeMatches(x, idx2, node.connect)) : null;
+  const targetNode = node.connect ? entry.nodes.find((x, idx2) => nodeMatches(x, idx2, node.connect, entry)) : null;
   const containerName = targetNode ? containerNameFor(targetNode.name) : (node.connect ? containerNameFor(node.connect) : rec.containerName);
   if (!containerName) return;
 
@@ -611,11 +611,11 @@ function loadBackends() {
  * direction shapes the editor-pane grid (see startNodes).
  */
 function splitDirection(i, layout, raw) {
-  if (i === 0) return false;
   if (raw === "down") return "down";
   if (raw === "right" || raw === true) return "right";
   if (raw === "false" || raw === false || raw === "none") return false;
   if (raw) return "right"; // any other truthy value → default direction
+  if (i === 0) return false;
   if (layout === "rows") return "down";
   if (layout === "split" || layout === "columns") return "right";
   return false;
@@ -776,7 +776,7 @@ async function startNodes(entry) {
   if (entry.assets) {
     // A key is valid if it matches a node's real name OR its alias.
     const orphans = Object.keys(entry.assets).filter(
-      (k) => !entry.nodes.some((n, idx) => nodeMatches(n, idx, k))
+      (k) => !entry.nodes.some((n, idx) => nodeMatches(n, idx, k, entry))
     );
     if (orphans.length) {
       const available = entry.nodes
@@ -822,13 +822,14 @@ async function startNodes(entry) {
   // Pre-calculate editor columns and layout grid groups
   const filteredNodes = entry.nodes.filter((n) => n.imageid || n.connect);
   const nodeLocations = filteredNodes.map((n, idx) => {
+    const effectiveSplit = n.split || (idx > 0 && filteredNodes[idx - 1].split);
     if (idx === 0) {
       editorCol += 1;
       columns.push([editorCol]);
-    } else if (n.split === "down" && columns.length) {
+    } else if (effectiveSplit === "down" && columns.length) {
       editorCol += 1;
       columns[columns.length - 1].push(editorCol);
-    } else if (n.split === "right") {
+    } else if (effectiveSplit === "right") {
       editorCol += 1;
       columns.push([editorCol]);
     } // if split is false/omitted, it stays in the current editorCol and columns remains unchanged
@@ -896,7 +897,7 @@ async function startNodes(entry) {
     }
 
     if (n.connect) {
-      const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect));
+      const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect, entry));
       const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
       const targetContainer = targetNode ? containerNameFor(targetNode.name) : containerNameFor(n.connect);
       const shell = n.cmd || (targetNode && targetNode.cmd) || "sh";
@@ -954,6 +955,18 @@ async function startNodes(entry) {
     terminals.push(rec);
   }
   entry.terminals = terminals;
+  for (const rec of terminals) {
+    if (!rec.mounts || !rec.mounts.length) {
+      const n = entry.nodes.find((x) => x.name === rec.name);
+      if (n && n.connect) {
+        const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, n.connect, entry));
+        const targetRec = targetNode ? terminals.find((r) => r.name === targetNode.name) : null;
+        if (targetRec && targetRec.mounts) {
+          rec.mounts = targetRec.mounts;
+        }
+      }
+    }
+  }
   // Where focus lands once everything has opened. VS Code makes the
   // most-recently-created terminal the active editor, and that selection is
   // applied asynchronously — so anything we do synchronously loses the race.
@@ -1556,23 +1569,31 @@ function invokedScriptRel(baseFsPath, value) {
  * So the same scenario JSON targets a node across backends with different node
  * names — `host1`, `HOST01`, an alias, or the real name all resolve.
  */
-function nodeRefs(node, index) {
-  const n = index + 1;
+function nodeRefs(node, index, entry) {
   const refs = [node.name];
   if (node.alias) refs.push(node.alias);
-  refs.push(`host${n}`, `host${String(n).padStart(2, "0")}`);
+  if (!node.connect) {
+    let primaryIndex = index;
+    if (entry && Array.isArray(entry.nodes)) {
+      primaryIndex = entry.nodes.filter((n) => !n.connect).indexOf(node);
+    }
+    if (primaryIndex !== -1) {
+      const n = primaryIndex + 1;
+      refs.push(`host${n}`, `host${String(n).padStart(2, "0")}`);
+    }
+  }
   return refs.map((r) => String(r).toLowerCase());
 }
 
 /** Does node #index answer to `ref` (name / alias / implicit hostN / host0N)? */
-function nodeMatches(node, index, ref) {
-  return nodeRefs(node, index).includes(String(ref).toLowerCase());
+function nodeMatches(node, index, ref, entry) {
+  return nodeRefs(node, index, entry).includes(String(ref).toLowerCase());
 }
 
 /** Find the node a scenario reference points to (or null). */
 function findNode(entry, ref) {
   const nodes = entry.nodes || [];
-  const i = nodes.findIndex((n, idx) => nodeMatches(n, idx, ref));
+  const i = nodes.findIndex((n, idx) => nodeMatches(n, idx, ref, entry));
   return i === -1 ? null : nodes[i];
 }
 
@@ -1587,7 +1608,8 @@ function pickHost(entry, host) {
     const node = findNode(entry, host);
     return node ? recs.find((r) => r.name === node.name) || null : null;
   }
-  return recs[0] || null;
+  const primaryNode = (entry.nodes || []).find((n) => !n.connect) || (entry.nodes && entry.nodes[0]);
+  return primaryNode ? recs.find((r) => r.name === primaryNode.name) || recs[0] || null : recs[0] || null;
 }
 
 // Killercoda-style traffic placeholder: `{{TRAFFIC_<host>_<port>}}` in scenario
@@ -1637,7 +1659,7 @@ function collectTrafficPorts(entry) {
 /** Resolve a step's `host` to a node (by name/alias/implicit), else the first node. */
 function nodeForHost(entry, host) {
   if (host) return findNode(entry, host);
-  return (entry.nodes || [])[0] || null;
+  return (entry.nodes || []).find((n) => !n.connect) || (entry.nodes || [])[0] || null;
 }
 
 /**
@@ -2101,7 +2123,7 @@ function stageNodeAssets(entry, node) {
   const nodeIdx = (entry.nodes || []).indexOf(node);
   let rules = [];
   if (entry.assets) {
-    const key = Object.keys(entry.assets).find((k) => nodeMatches(node, nodeIdx, k));
+    const key = Object.keys(entry.assets).find((k) => nodeMatches(node, nodeIdx, k, entry));
     if (key) rules = entry.assets[key];
   }
   const assetsRoot = path.join(entry.baseFsPath, "assets");
