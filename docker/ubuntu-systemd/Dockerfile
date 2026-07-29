@@ -38,6 +38,10 @@ RUN touch /etc/modules \
       iproute2 \
       make \
       iputils-ping \
+      git \
+      python3 \
+      python3-pip \
+      python-is-python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # The stock ubuntu image ships /usr/sbin/policy-rc.d (`exit 101`) to block
