@@ -20,29 +20,33 @@ ENV container=docker
 # Same baseline tooling as the "ubuntu" image, plus systemd as init.
 # `touch /etc/modules` mirrors the lean image (some procedures sed it).
 RUN touch /etc/modules \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
-      wget \
-      telnet \
-      docker.io \
-      podman \
-      kmod \
-      sudo \
-      vim \
-      nano \
-      tree \
-      systemd \
-      systemd-sysv \
-      iproute2 \
-      make \
-      iputils-ping \
-      git \
-      python3 \
-      python3-pip \
-      python-is-python3 \
- && rm -rf /var/lib/apt/lists/*
+     && apt-get update \
+     && apt-get install -y --no-install-recommends \
+     ca-certificates \
+     curl \
+     wget \
+     telnet \
+     docker.io \
+     podman \
+     kmod \
+     sudo \
+     vim \
+     nano \
+     tree \
+     systemd \
+     systemd-sysv \
+     iproute2 \
+     make \
+     iputils-ping \
+     git \
+     python3 \
+     python3-pip \
+     python3-venv \
+     python-is-python3 \
+     jq \
+     && rm -rf /var/lib/apt/lists/* \
+     && wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_$(dpkg --print-architecture) -O /usr/bin/yq \
+     && chmod +x /usr/bin/yq
 
 # The stock ubuntu image ships /usr/sbin/policy-rc.d (`exit 101`) to block
 # package post-install scripts from auto-starting services during image builds.
@@ -55,19 +59,19 @@ RUN rm -f /usr/sbin/policy-rc.d
 # Strip units that are pointless or fail inside a container, so boot is clean
 # and fast (no getty consoles, no udev, no swap/mount targets we don't have).
 RUN find /etc/systemd/system /lib/systemd/system \
-      -path '*.wants/*' \
-      \( -name '*udev*' -o -name '*getty*' -o -name '*swap*' \) \
-      -delete \
- && systemctl mask \
-      systemd-resolved.service \
-      systemd-networkd.service \
-      systemd-firstboot.service \
-      systemd-remount-fs.service \
-      getty.target \
-      console-getty.service \
-      podman-auto-update.service \
-      podman-clean-transient.service \
-      podman-restart.service 2>/dev/null || true
+     -path '*.wants/*' \
+     \( -name '*udev*' -o -name '*getty*' -o -name '*swap*' \) \
+     -delete \
+     && systemctl mask \
+     systemd-resolved.service \
+     systemd-networkd.service \
+     systemd-firstboot.service \
+     systemd-remount-fs.service \
+     getty.target \
+     console-getty.service \
+     podman-auto-update.service \
+     podman-clean-transient.service \
+     podman-restart.service 2>/dev/null || true
 
 # Make / rshared at boot (host-like), so the kubelet and CNIs (Cilium bpffs)
 # get the mount propagation they need. See the unit file for the full why.

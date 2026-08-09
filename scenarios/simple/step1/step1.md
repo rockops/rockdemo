@@ -62,3 +62,28 @@ echo "I am host3"
 ```bash
 echo "I am host3"
 ```{{exec target=host3 hidden=true text="Run hidden command"}}
+
+<!-- this comment should be skipped -->
+
+Begin<!-- YOU SHOULD NOT SEE THIS -->End
+
+<!--
+this comment should also be skipped
+it is on multiple lines
+-->
+
+<!--rockdemo I am on ROCKDEMO ! -->
+
+<!--killercoda start-->
+I am on KILLERCODA !
+<!--killercoda end-->
+
+```bash
+echo "I am host3"
+```{{exec <!--rockdemo target=host3 hidden=true text="Run hidden command"-->}}
+
+<!--killercoda start-->
+This is KILLERCODA. You should not see this
+<!--killercoda end-->
+
+Begin<!--killercoda start-->HIDDEN NO KILLERCODA<!--killercoda end-->End
