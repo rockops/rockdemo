@@ -183,6 +183,47 @@ The target can be:
 
 When `target` is not set, the command is executed in the active terminal (or falls back to the first node terminal).
 
+### RockDemo-Specific Content (`<!--rockdemo ... -->`)
+
+You can include rockDemo-specific markdown code blocks or content that will be output and executed in rockDemo, while remaining completely hidden on standard markdown renderers like Killercoda, by wrapping the block in `<!--rockdemo` and `-->`:
+
+```markdown
+<!--rockdemo
+```bash
+echo "This code block is only visible and executable in rockDemo!"
+```{{exec}}
+-->
+```
+
+- **rockDemo behavior:** Extracts and renders the inner content (stripping the `<!--rockdemo` and `-->` comment markers) as active markdown.
+- **Killercoda behavior:** Sees standard HTML comments (`<!-- ... -->`) and ignores/hides the entire block.
+
+### Killercoda-Specific Content (`<!--killercoda start--> ... <!--killercoda end-->`)
+
+You can include Killercoda-specific markdown content that will render on Killercoda but be skipped completely on rockDemo by wrapping the block with `<!--killercoda start-->` and `<!--killercoda end-->`:
+
+```markdown
+<!--killercoda start-->
+This text will render on Killercoda, but will be skipped on rockDemo.
+<!--killercoda end-->
+```
+
+- **Killercoda behavior:** Sees `<!--killercoda start-->` and `<!--killercoda end-->` as separate HTML comments and renders all content between them.
+- **rockDemo behavior:** Skips and suppresses all content between `<!--killercoda start-->` and `<!--killercoda end-->`.
+
+### Environment Detection in Startup Scripts
+
+In scenario background/foreground startup scripts (e.g. `foreground.sh` or `background.sh`), you can detect whether the environment is running under **rockDemo** vs **Killercoda** by checking for the presence of the `/rockdemo` folder (which exists exclusively in rockDemo containers):
+
+```bash
+if [ -d /rockdemo ]; then
+    echo "Running in rockDemo environment"
+else
+    echo "Running in Killercoda environment"
+fi
+```
+
+
 > **⚠️ Not Killercoda-compatible:** The `target` modifier is a **rockDemo-only** feature. Killercoda does not support target annotations and will ignore them.
 
 

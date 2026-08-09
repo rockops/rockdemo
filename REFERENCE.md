@@ -63,6 +63,10 @@ The webview uses a small zero-dependency markdown renderer that also supports:
   [Third-party notices](#third-party-notices)). The theme follows the editor's
   light/dark preference. A highlight spec on the info string
   (e.g. ` ```js {2,5-6} `) shades those lines.
+- **rockDemo-specific content (`<!--rockdemo ... -->`)** — blocks wrapped in `<!--rockdemo` and `-->` are unwrapped and outputted as active markdown in rockDemo, while standard markdown engines like Killercoda treat them as regular HTML comments and ignore them.
+- **Killercoda-specific content (`<!--killercoda start--> ... <!--killercoda end-->`)** — blocks between `<!--killercoda start-->` and `<!--killercoda end-->` are printed on Killercoda (which treats the start/end tags as regular HTML comments), but skipped completely on rockDemo.
+- **Environment detection in startup scripts** — in `foreground.sh` or `background.sh`, check `if [ -d /rockdemo ]; then ... fi` to detect if the container is running in rockDemo vs Killercoda.
+
 
 ### Two modes
 

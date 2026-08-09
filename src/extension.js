@@ -10,6 +10,35 @@ const { execFileSync } = require("child_process");
 let extensionUri = null;
 
 /**
+ * Strip HTML-style comments (`<!-- ... -->`) from markdown text.
+ * If `preserveNewlines` is true, replaces comment content with matching number of newlines
+ * to keep line indices intact (useful for parsers that compute line numbers, e.g. parseScenario).
+ *
+ * @param {string} text
+ * @param {boolean} [preserveNewlines=false]
+ * @returns {string}
+ */
+function stripComments(text, preserveNewlines = false) {
+  if (!text) return "";
+  const killercodaStripped = text.replace(/<!--\s*killercoda\s+start\s*-->[\s\S]*?<!--\s*killercoda\s+end\s*-->/gi, (match) => {
+    if (preserveNewlines) {
+      const newlineCount = (match.match(/\r?\n/g) || []).length;
+      return "\n".repeat(newlineCount);
+    }
+    return "";
+  });
+  const unwrapped = killercodaStripped.replace(/<!--\s*rockdemo\b([\s\S]*?)-->/gi, "$1");
+  return unwrapped.replace(/<!--[\s\S]*?-->/g, (match) => {
+    if (preserveNewlines) {
+      const newlineCount = (match.match(/\r?\n/g) || []).length;
+      return "\n".repeat(newlineCount);
+    }
+    return "";
+  });
+}
+
+
+/**
  * Parse the text inside a `{{ ... }}` annotation into an action + modifiers.
  * The annotation may carry a modifier after the action, e.g. `{{exec interrupt}}`.
  *
@@ -89,7 +118,8 @@ function parseAnnotation(raw) {
  * @returns {{ openLine: number, action: string, lang: string, content: string, interrupt: boolean }[]}
  */
 function parseScenario(document) {
-  const lines = document.getText().split(/\r?\n/);
+  const cleanText = stripComments(document.getText(), true);
+  const lines = cleanText.split(/\r?\n/);
   const blocks = [];
 
   let inFence = false;
@@ -1636,7 +1666,7 @@ function collectTrafficPorts(entry) {
   for (const rel of rels) {
     let text;
     try {
-      text = fs.readFileSync(path.join(entry.baseFsPath, rel), "utf8");
+      text = stripComments(fs.readFileSync(path.join(entry.baseFsPath, rel), "utf8"));
     } catch (err) {
       continue; // missing step file — buildScenario already surfaces that
     }
@@ -2550,7 +2580,8 @@ function codeBlockHtml(content, lang, highlight) {
  * parseScenario / the CodeLens provider so the two modes never disagree.
  */
 function renderMarkdownToHtml(text, baseStr, webview) {
-  const lines = text.split(/\r?\n/);
+  const cleanText = stripComments(text);
+  const lines = cleanText.split(/\r?\n/);
   const out = [];
   // Inline renderer bound to this render's base dir + webview, so relative
   // image srcs resolve to webview-safe URLs.
