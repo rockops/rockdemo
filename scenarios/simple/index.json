@@ -74,7 +74,14 @@
         "cmd": "bash",
         "ip": "172.30.2.2",
         "privileged": true,
-        "tabname": "TAB2"
+        "tabname": "TAB2",
+        "mount": [
+          {
+            "src": "/tmp",
+            "dest": "/root/tmp",
+            "ro": true
+          }
+        ]
       }
     ]
   }

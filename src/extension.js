@@ -669,6 +669,7 @@ function nodesFromConfig(nodes, layout) {
     split: splitDirection(i, layout, n.split),
     color: n.color || null,
     tabname: n.tabname || n.tabName || null,
+    mount: n.mount || n.mounts || null,
   }));
 }
 
@@ -751,6 +752,58 @@ function resolveNoProxy(scenario) {
     if (profile) return noProxyList(profile.noProxy);
   }
   return [];
+}
+
+/**
+ * Resolve a single mount object `{"src": "...", "dest": "..."}`.
+ * If the host source folder does not exist, returns null (skipping the mount).
+ */
+function resolveMountItem(item, baseFsPath) {
+  if (!item || typeof item !== "object") return null;
+  let src = item.src || item.source;
+  let dest = item.dest || item.dst || item.container || item.target;
+  if (!src || !dest) return null;
+
+  src = String(src).trim();
+  dest = String(dest).trim();
+  if (!src || !dest) return null;
+
+  // Tilde expansion (~ -> user home dir)
+  if (src === "~" || src.startsWith("~/")) {
+    const home = os.homedir();
+    src = src === "~" ? home : path.join(home, src.slice(2));
+  } else if (!path.isAbsolute(src)) {
+    src = baseFsPath ? path.resolve(baseFsPath, src) : path.resolve(src);
+  }
+
+  try {
+    if (!fs.existsSync(src)) {
+      return null;
+    }
+  } catch (err) {
+    return null;
+  }
+
+  const container = normalizeContainerPath(dest);
+  const ro = !!(item.ro || item.readOnly);
+  return { host: src, container, ro };
+}
+
+/**
+ * Resolve a node's bind mounts declared in `node.mount` or `node.mounts`.
+ * If the host source folder does not exist, skips missing mount items.
+ */
+function resolveNodeMounts(node, baseFsPath) {
+  if (!node) return [];
+  const rawList = node.mount || node.mounts;
+  if (!Array.isArray(rawList)) return [];
+
+  const mounts = [];
+  for (const item of rawList) {
+    const resolved = resolveMountItem(item, baseFsPath);
+    if (resolved) mounts.push(resolved);
+  }
+  return mounts;
 }
 
 /**
@@ -975,6 +1028,9 @@ async function startNodes(entry) {
       // (rockdemo-proxy.service), which is what lets pulls work behind a
       // TLS-intercepting corporate proxy.
       if (hostCa) mounts.push({ host: hostCa, container: HOST_CA_MOUNT, ro: true });
+      // Add per-node bind mounts if defined
+      const nodeMounts = resolveNodeMounts(n, entry.baseFsPath);
+      mounts.push(...nodeMounts);
       const ports = entry.trafficPorts.get(n.name) || [];
 
       rec = startNamedContainer(
