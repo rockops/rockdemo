@@ -1,20 +1,24 @@
 {
-    "title": "Installation kubernetes",
-    "description": "Install Kubernetes with kubeadm",
-    "details": {
-      "steps": [
-        {
-          "title": "Premieres commandes",
-          "text": "step1/step1.md"
-        }
-      ],
-      "assets": {
-        "node1": [
-          {"file": "*", "target": "/root","chmod":"+w"}
-        ]
+  "title": "Installation kubernetes",
+  "description": "Install Kubernetes with kubeadm",
+  "details": {
+    "steps": [
+      {
+        "title": "Premieres commandes",
+        "text": "step1/step1.md"
       }
-    },
-    "backend": {
-      "imageid": "ubuntu-systemd"
+    ],
+    "assets": {
+      "node1": [
+        {
+          "file": "*",
+          "target": "/root",
+          "chmod": "+w"
+        }
+      ]
     }
+  },
+  "backend": {
+    "imageid": "ubuntu"
+  }
 }
