@@ -52,6 +52,7 @@ The webview uses a small zero-dependency markdown renderer that also supports:
 - **HTML passthrough** — an allow-list of inline/block tags (`<br>`, `<kbd>`,
   `<img>`, `<div>`, `<table>`, `<details>`, headings, lists, etc.) is emitted
   verbatim instead of being escaped, so author HTML renders as intended.
+- **Tables** — markdown tables (`| header | ... |`) render as styled `<table>` elements with column alignments.
 - **Blockquotes** — lines starting with `>` render as `<blockquote>`.
 - **Images** — both markdown `![alt](src)` and raw `<img src="…">` render. A
   **relative** `src` (e.g. `./logo.png`, `../assets/logo.png`) is resolved
