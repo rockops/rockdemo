@@ -2434,12 +2434,29 @@ function isPassthroughTag(name) {
   return HTML_PASSTHROUGH_TAGS.has(name.toLowerCase());
 }
 
-/** Does the (trimmed) line consist of a single allow-listed HTML tag? */
+/** Does the (trimmed) line consist of a single allow-listed HTML tag or HTML block? */
 function isHtmlBlockLine(line) {
   const m = line.match(
     /^<\/?([a-zA-Z][a-zA-Z0-9-]*)(?:\s[^<>]*)?\/?>$/
   );
-  return !!m && isPassthroughTag(m[1]);
+  if (m && isPassthroughTag(m[1])) return true;
+  const blockM = line.match(/^<([a-zA-Z][a-zA-Z0-9-]*)(?:\s[^>]*)?>[\s\S]*<\/\1>$/);
+  return !!blockM && isPassthroughTag(blockM[1]);
+}
+
+/** Does the line look like a markdown table delimiter row (e.g. |---|---| or :---|---:)? */
+function isTableDelimiter(line) {
+  if (!line) return false;
+  const trimmed = line.trim();
+  return /^\s*\|?(\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$/.test(trimmed);
+}
+
+/** Split a markdown table row into trimmed cell strings. */
+function splitTableRow(line) {
+  let trimmed = line.trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+  return trimmed.split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, "|"));
 }
 
 /**
@@ -2797,6 +2814,55 @@ function renderMarkdownToHtml(text, baseStr, webview) {
       continue;
     }
 
+    // Markdown table: header row with pipes followed immediately by delimiter row.
+    if (line.includes("|") && i + 1 < lines.length && isTableDelimiter(lines[i + 1])) {
+      flushParagraph();
+      flushQuote();
+      closeList();
+
+      const delimCells = splitTableRow(lines[i + 1]);
+      const alignments = delimCells.map((c) => {
+        const t = c.trim();
+        const left = t.startsWith(":");
+        const right = t.endsWith(":");
+        if (left && right) return "center";
+        if (right) return "right";
+        if (left) return "left";
+        return "";
+      });
+
+      const headerCells = splitTableRow(line);
+      const ths = headerCells
+        .map((c, idx) => {
+          const a = alignments[idx] ? ` style="text-align:${alignments[idx]}"` : "";
+          return `<th${a}>${ri(c.trim())}</th>`;
+        })
+        .join("");
+
+      const rows = [];
+      let j = i + 2;
+      while (j < lines.length) {
+        const rLine = lines[j];
+        if (rLine.trim() === "" || !rLine.includes("|")) break;
+        if (/^```|^#{1,6}\s+|^(\s*[-*_]){3,}\s*$|^\s*[-*]\s+|^\s*\d+\.\s+|^\s*>/.test(rLine)) break;
+        const cells = splitTableRow(rLine);
+        const tds = cells
+          .map((c, idx) => {
+            const a = alignments[idx] ? ` style="text-align:${alignments[idx]}"` : "";
+            return `<td${a}>${ri(c.trim())}</td>`;
+          })
+          .join("");
+        rows.push(`<tr>${tds}</tr>`);
+        j++;
+      }
+
+      out.push(
+        `<table><thead><tr>${ths}</tr></thead><tbody>${rows.join("")}</tbody></table>`
+      );
+      i = j - 1;
+      continue;
+    }
+
     // Otherwise: accumulate into a paragraph (ending any pending blockquote).
     flushQuote();
     paragraph.push(line.trim());
@@ -3085,6 +3151,24 @@ ${hljsHead}
   }
   blockquote > :first-child { margin-top: 0; }
   blockquote > :last-child { margin-bottom: 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.2em 0;
+    font-size: 0.95em;
+  }
+  th, td {
+    border: 1px solid var(--vscode-panel-border);
+    padding: .5em .8em;
+    text-align: left;
+  }
+  th {
+    background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, .1));
+    font-weight: 600;
+  }
+  tr:nth-child(even) {
+    background: rgba(127, 127, 127, .04);
+  }
   .lead { font-size: 1.1em; opacity: .85; }
   .crumb { font-size: .8em; text-transform: uppercase; letter-spacing: .05em; opacity: .6; margin: 0; }
   section[data-step] { display: none; }
