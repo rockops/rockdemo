@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {
+      "name": "node1",
+      "imageid": "alpine",
+      "cmd": "sh",
+      "ip": "172.30.1.2",
+      "background": "background.sh",
+      "foreground": "foreground.sh"
+    }
+  ]
+}
