@@ -348,19 +348,34 @@ function backendScriptRoot() {
 }
 
 /**
- * Resolve a backend script reference (a path relative to config/, e.g.
- * "ubuntu/startup.sh") to its host path and the path it is mounted at inside the
- * container. Returns null if the file is missing on the host.
+ * Resolve a backend script reference (a path relative to backendDir, or relative
+ * to config/, e.g. "ubuntu/startup.sh") to its host path and the path it is
+ * mounted at inside the container. Returns null if the file is missing on the host.
  */
-function resolveBackendScript(ref) {
+function resolveBackendScript(ref, backendDir) {
   if (!ref) return null;
-  const hostPath = path.join(backendScriptRoot(), ref);
-  try {
-    if (!fs.statSync(hostPath).isFile()) return null;
-  } catch (err) {
-    return null;
+  const trimmed = String(ref).trim();
+  if (backendDir) {
+    const hostPath = path.isAbsolute(trimmed)
+      ? trimmed
+      : path.resolve(backendDir, trimmed);
+    try {
+      if (fs.statSync(hostPath).isFile()) {
+        const rel = path.relative(backendDir, hostPath).replace(/\\/g, "/");
+        return { hostPath, containerPath: `${CONFIG_MOUNT}/${rel}`, mountRoot: backendDir };
+      }
+    } catch (err) {}
   }
-  return { hostPath, containerPath: `${CONFIG_MOUNT}/${ref}` };
+  const hostPath = path.isAbsolute(trimmed)
+    ? trimmed
+    : path.resolve(backendScriptRoot(), trimmed);
+  try {
+    if (fs.statSync(hostPath).isFile()) {
+      const rel = path.relative(backendScriptRoot(), hostPath).replace(/\\/g, "/");
+      return { hostPath, containerPath: `${CONFIG_MOUNT}/${rel}`, mountRoot: backendScriptRoot() };
+    }
+  } catch (err) {}
+  return null;
 }
 
 /** Shell snippet that ensures the rockdemo network exists (idempotent). */
@@ -651,7 +666,7 @@ function splitDirection(i, layout, raw) {
   return false;
 }
 
-function nodesFromConfig(nodes, layout) {
+function nodesFromConfig(nodes, layout, backendDir) {
   const list = Array.isArray(nodes)
     ? nodes
     : Object.keys(nodes || {}).map((name) => ({ name, ...nodes[name] }));
@@ -666,6 +681,7 @@ function nodesFromConfig(nodes, layout) {
     systemd: !!n.systemd,
     background: n.background || null,
     foreground: n.foreground || null,
+    backendDir: backendDir || null,
     split: splitDirection(i, layout, n.split),
     color: n.color || null,
     tabname: n.tabname || n.tabName || null,
@@ -674,17 +690,81 @@ function nodesFromConfig(nodes, layout) {
 }
 
 /**
+ * Load external backendExtended configuration when `backendExtended.path` is specified.
+ * Reads the referenced file relative to the scenario folder (baseFsPath).
+ * The external file may contain:
+ * - A full backendExtended object: `{ "nodes": [...], "layout": "...", "noProxy": [...] }`
+ * - An ordered list of node definitions: `[ { "name": "host1", ... } ]`
+ * - A map of node definitions: `{ "host1": { ... } }`
+ */
+function resolveBackendExtended(ext, scenarioDir) {
+  if (!ext || typeof ext !== "object") return null;
+  if (!ext.path) {
+    return {
+      ...ext,
+      _backendDir: scenarioDir || null,
+    };
+  }
+
+  try {
+    let baseDir = scenarioDir;
+    if (!baseDir && typeof runningScenarioEntry !== "undefined" && runningScenarioEntry && runningScenarioEntry.baseFsPath) {
+      baseDir = runningScenarioEntry.baseFsPath;
+    }
+    const fullPath = path.isAbsolute(ext.path)
+      ? ext.path
+      : path.resolve(baseDir || "", ext.path);
+
+    if (!fs.existsSync(fullPath)) {
+      vscode.window.showErrorMessage(
+        `rockDemo: backendExtended file not found: "${ext.path}"`
+      );
+      return null;
+    }
+
+    const content = fs.readFileSync(fullPath, "utf8");
+    const parsed = JSON.parse(content);
+
+    let nodes = parsed;
+    let layout = ext.layout;
+    let noProxy = ext.noProxy;
+
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (parsed.nodes) {
+        nodes = parsed.nodes;
+        if (layout === undefined) layout = parsed.layout;
+        if (noProxy === undefined) noProxy = parsed.noProxy;
+      }
+    }
+
+    return {
+      ...(typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}),
+      ...ext,
+      nodes,
+      layout,
+      noProxy,
+      _backendDir: path.dirname(fullPath),
+    };
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `rockDemo: failed to read backendExtended from "${ext.path}": ${err.message}`
+    );
+    return null;
+  }
+}
+
+/**
  * Resolve a scenario's backend into a flat list of nodes to launch.
- * - `backendExtended.nodes` (when present) wins — each node becomes its own
- *   named terminal/container.
+ * - `backendExtended.nodes` or `backendExtended.path` (when present) wins —
+ *   each node becomes its own named terminal/container.
  * - Otherwise `backend.imageid` is treated as a *key* into the bundled default
  *   profiles (config/backends.json); the matching profile's nodes are used.
  * - An unknown key warns and launches nothing (custom backends must use
  *   `backendExtended`).
  */
-function resolveNodes(scenario) {
-  const ext = scenario.backendExtended;
-  if (ext && ext.nodes) return nodesFromConfig(ext.nodes, ext.layout);
+function resolveNodes(scenario, scenarioDir) {
+  const ext = resolveBackendExtended(scenario.backendExtended, scenarioDir);
+  if (ext && ext.nodes) return nodesFromConfig(ext.nodes, ext.layout, ext._backendDir);
 
   const key = scenario.backend && scenario.backend.imageid;
   if (key) {
@@ -743,9 +823,9 @@ function noProxyList(v) {
  * Kubernetes profiles carry the pod and service CIDRs here so cluster-internal
  * traffic never goes through the proxy. See proxyEnvArgs.
  */
-function resolveNoProxy(scenario) {
-  const ext = scenario.backendExtended;
-  if (ext && ext.nodes) return noProxyList(ext.noProxy);
+function resolveNoProxy(scenario, scenarioDir) {
+  const ext = resolveBackendExtended(scenario.backendExtended, scenarioDir);
+  if (ext && (ext.nodes || ext.noProxy)) return noProxyList(ext.noProxy);
   const key = scenario.backend && scenario.backend.imageid;
   if (key) {
     const profile = loadBackends()[key];
@@ -1015,10 +1095,11 @@ async function startNodes(entry) {
         mounts.unshift({ host: entry.baseFsPath, container: "/scenario", ro: true });
       }
       // When the node references backend-level scripts (background/foreground),
-      // mount the extension's bundled config/ folder read-only so those scripts
-      // are available in the container at CONFIG_MOUNT and run by path.
+      // stage them into the ephemeral scratch directory (always overwriting any
+      // cached copy) and mount it read-only at CONFIG_MOUNT so those scripts run by path.
       if (n.background || n.foreground) {
-        mounts.unshift({ host: backendScriptRoot(), container: CONFIG_MOUNT, ro: true });
+        const backendMount = stageBackendScripts(entry, n);
+        if (backendMount) mounts.unshift(backendMount);
       }
       // Overlay executable copies of any scripts this node invokes by name, so a
       // non-executable source script still runs (without touching the source).
@@ -1943,10 +2024,13 @@ async function runBackendBackground(entry) {
     const rec = (entry.terminals || []).find((r) => r.name === node.name);
     if (!rec) continue;
 
-    const script = resolveBackendScript(node.background);
+    const script = resolveBackendScript(node.background, node.backendDir);
     if (!script) {
+      const targetPath = node.backendDir
+        ? `${node.background} (in ${node.backendDir})`
+        : `config/${node.background}`;
       vscode.window.showWarningMessage(
-        `rockDemo: backend background script not found: config/${node.background}`
+        `rockDemo: backend background script not found: ${targetPath}`
       );
       continue;
     }
@@ -1982,7 +2066,7 @@ async function runBackendForeground(entry) {
     const rec = (entry.terminals || []).find((r) => r.name === node.name);
     if (!rec) continue;
 
-    const script = resolveBackendScript(node.foreground);
+    const script = resolveBackendScript(node.foreground, node.backendDir);
     const marker = `/tmp/.rockdemo-fg-backend-${node.name}`;
     const sendKey = "backend:" + node.name;
     const token = "node:" + node.name;
@@ -1994,8 +2078,11 @@ async function runBackendForeground(entry) {
     if (!script) {
       if (!entry.fgDone.has(sendKey)) {
         entry.fgDone.add(sendKey);
+        const targetPath = node.backendDir
+          ? `${node.foreground} (in ${node.backendDir})`
+          : `config/${node.foreground}`;
         vscode.window.showWarningMessage(
-          `rockDemo: backend foreground script not found: config/${node.foreground}`
+          `rockDemo: backend foreground script not found: ${targetPath}`
         );
       }
       fgUngate(entry, "intro", token);
@@ -2270,6 +2357,66 @@ function stageNodeScripts(entry, node) {
 }
 
 /**
+ * Recursively copy a directory's contents into another, always overwriting
+ * existing files so the staged cache reflects the latest host edits, and
+ * making all `.sh` scripts executable.
+ */
+function copyDirOverwrite(srcDir, dstDir) {
+  if (!fs.existsSync(srcDir)) return;
+  fs.mkdirSync(dstDir, { recursive: true });
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const ent of entries) {
+    const srcPath = path.join(srcDir, ent.name);
+    const dstPath = path.join(dstDir, ent.name);
+    if (ent.isDirectory()) {
+      copyDirOverwrite(srcPath, dstPath);
+    } else if (ent.isFile()) {
+      fs.copyFileSync(srcPath, dstPath);
+      try {
+        const mode = fs.statSync(srcPath).mode;
+        if (ent.name.endsWith(".sh") || (mode & 0o111) !== 0) {
+          fs.chmodSync(dstPath, mode | 0o111);
+        }
+      } catch (err) {}
+    }
+  }
+}
+
+/**
+ * Stage backend-level foreground and background scripts into the ephemeral
+ * `.rockdemo-run` scratch/cache directory, always overwriting with the latest
+ * source version from the host.
+ * Returns the mount descriptor for CONFIG_MOUNT.
+ */
+function stageBackendScripts(entry, node) {
+  if (!node.background && !node.foreground) return null;
+
+  const bgScript = resolveBackendScript(node.background, node.backendDir);
+  const fgScript = resolveBackendScript(node.foreground, node.backendDir);
+  const sourceRoot =
+    (bgScript && bgScript.mountRoot) ||
+    (fgScript && fgScript.mountRoot) ||
+    node.backendDir ||
+    backendScriptRoot();
+
+  if (entry && entry.baseFsPath) {
+    const safeNode = node.name.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    const targetDir = path.join(entry.baseFsPath, RUN_DIR, safeNode, "config");
+    try {
+      fs.mkdirSync(targetDir, { recursive: true });
+      if (fs.existsSync(sourceRoot)) {
+        copyDirOverwrite(sourceRoot, targetDir);
+      }
+      return { host: targetDir, container: CONFIG_MOUNT, ro: true };
+    } catch (err) {
+      console.warn("rockDemo: failed to stage backend scripts to scratch dir:", err);
+    }
+  }
+
+  return { host: sourceRoot, container: CONFIG_MOUNT, ro: true };
+}
+
+/**
  * Reverse-map a container-absolute path to the host copy mounted there, by
  * matching the longest mount `container` prefix across the entry's nodes
  * (preferring the active node's terminal on ties). Returns null if unmapped.
@@ -2305,6 +2452,14 @@ function restartScenario(entry) {
     applyTerminalBackground(entry, "default");
   }
   disposeEntryTerminals(entry);
+  if (entry.doc) {
+    try {
+      const sc = JSON.parse(entry.doc.getText());
+      entry.scenario = sc;
+      entry.nodes = resolveNodes(sc, entry.baseFsPath);
+      entry.noProxy = resolveNoProxy(sc, entry.baseFsPath);
+    } catch (err) {}
+  }
   entry.startPromise = startNodes(entry);
   buildScenario(entry.doc, entry.nodes).then((data) => {
     if (!entry.disposed) {
@@ -3841,10 +3996,10 @@ async function openScenarioPanel(jsonDoc, scenarioPanels) {
         localResourceRoots: resourceRoots(jsonDoc.uri),
       }
     );
-    const nodes = resolveNodes(scenario);
-    const noProxy = resolveNoProxy(scenario);
-    const assets = (scenario.details && scenario.details.assets) || null;
     const baseFsPath = vscode.Uri.joinPath(jsonDoc.uri, "..").fsPath;
+    const nodes = resolveNodes(scenario, baseFsPath);
+    const noProxy = resolveNoProxy(scenario, baseFsPath);
+    const assets = (scenario.details && scenario.details.assets) || null;
     entry = {
       panel,
       doc: jsonDoc,
@@ -3899,9 +4054,9 @@ function isScenarioDoc(doc) {
 }
 
 /** Resolve all image IDs used by the nodes of a scenario. */
-function getScenarioImages(scenario) {
+function getScenarioImages(scenario, scenarioDir) {
   try {
-    const nodes = resolveNodes(scenario);
+    const nodes = resolveNodes(scenario, scenarioDir);
     return nodes.map(n => n.imageid).filter(Boolean);
   } catch (err) {
     return [];
@@ -3914,12 +4069,12 @@ async function getImagesToClear(entry) {
 
   // 1. If entry is provided, get images from it
   if (entry && entry.scenario) {
-    getScenarioImages(entry.scenario).forEach(img => images.add(img));
+    getScenarioImages(entry.scenario, entry.baseFsPath).forEach(img => images.add(img));
   }
 
   // 2. If runningScenarioEntry is active, get images from it
   if (runningScenarioEntry && runningScenarioEntry.scenario) {
-    getScenarioImages(runningScenarioEntry.scenario).forEach(img => images.add(img));
+    getScenarioImages(runningScenarioEntry.scenario, runningScenarioEntry.baseFsPath).forEach(img => images.add(img));
   }
 
   // 3. If there's an active scenario document in the editor
@@ -3927,7 +4082,7 @@ async function getImagesToClear(entry) {
   if (editor && isScenarioDoc(editor.document)) {
     try {
       const scenario = JSON.parse(editor.document.getText());
-      getScenarioImages(scenario).forEach(img => images.add(img));
+      getScenarioImages(scenario, path.dirname(editor.document.uri.fsPath)).forEach(img => images.add(img));
     } catch (err) {
       // ignore
     }
@@ -3940,7 +4095,7 @@ async function getImagesToClear(entry) {
       try {
         const content = await readText(uri);
         const scenario = JSON.parse(content);
-        getScenarioImages(scenario).forEach(img => images.add(img));
+        getScenarioImages(scenario, path.dirname(uri.fsPath)).forEach(img => images.add(img));
       } catch (err) {
         // ignore
       }
@@ -4304,9 +4459,40 @@ function activate(context) {
   };
   const refresh = (doc) => {
     refreshDemo(doc);
-    // Any save can affect a scenario (its index.json or any step markdown):
+    // Any save can affect a scenario (its index.json, any step markdown, or backend scripts):
     // rebuild every open scenario player.
     for (const entry of scenarioPanels.values()) {
+      if (entry.doc) {
+        try {
+          entry.scenario = JSON.parse(entry.doc.getText());
+          entry.nodes = resolveNodes(entry.scenario, entry.baseFsPath);
+          entry.noProxy = resolveNoProxy(entry.scenario, entry.baseFsPath);
+        } catch (err) {}
+      }
+
+      // Re-stage backend scripts into the scratch/cache directory, always overwriting with latest content
+      if (entry.nodes) {
+        const docPath = doc && doc.uri && doc.uri.fsPath;
+        for (const n of entry.nodes) {
+          stageBackendScripts(entry, n);
+          const fgScript = resolveBackendScript(n.foreground, n.backendDir);
+          const bgScript = resolveBackendScript(n.background, n.backendDir);
+          const isFgDoc = docPath && fgScript && (docPath === fgScript.hostPath || (n.backendDir && docPath.startsWith(n.backendDir)));
+          const isBgDoc = docPath && bgScript && (docPath === bgScript.hostPath || (n.backendDir && docPath.startsWith(n.backendDir)));
+          if (isFgDoc && entry.fgDone) {
+            entry.fgDone.delete("backend:" + n.name);
+            const rec = entry.terminals && entry.terminals.find((r) => r.name === n.name);
+            if (rec && rec.containerName) {
+              const marker = `/tmp/.rockdemo-fg-backend-${n.name}`;
+              execFile("docker", ["exec", rec.containerName, "rm", "-f", marker]).catch(() => {});
+            }
+          }
+          if (isBgDoc && entry.bgDone) {
+            entry.bgDone.delete("backend:" + n.name);
+          }
+        }
+      }
+
       buildScenario(entry.doc, entry.nodes).then((data) => {
         entry.panel.webview.html = scenarioHtml(data, entry.panel.webview);
       });

@@ -1,0 +1,21 @@
+{
+  "title": "Backend Path Test",
+  "description": "Test backendExtended.path loading an external backend JSON file",
+  "details": {
+    "intro": {
+      "text": "intro.md"
+    },
+    "steps": [
+      {
+        "title": "Test Alpine Node",
+        "text": "step1.md"
+      }
+    ],
+    "finish": {
+      "text": "finish.md"
+    }
+  },
+  "backendExtended": {
+    "path": "backend/alpine.json"
+  }
+}
