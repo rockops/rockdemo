@@ -243,6 +243,11 @@ or a side-by-side split via `layout` / per-node `split`):
     { "name": "node01",       "imageid": "…", "cmd": "bash", "ip": "172.30.1.3" }
   ]
 }
+
+// Or reference an external JSON file relative to index.json:
+"backendExtended": {
+  "path": "./backends/cluster.json"
+}
 ```
 
 > **⚠️ Not Killercoda-compatible.** `backendExtended` is a **rockDemo-only**

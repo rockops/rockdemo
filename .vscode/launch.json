@@ -7,9 +7,11 @@
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/scenarios/simple"
+        "${workspaceFolder}/scenarios"
       ],
-      "outFiles": ["${workspaceFolder}/src/**/*.js"]
+      "outFiles": [
+        "${workspaceFolder}/src/**/*.js"
+      ]
     }
   ]
 }

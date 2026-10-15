@@ -213,6 +213,12 @@ prompts for the node rather than one entry per live node.)*
   order defines the implicit positional aliases `host1`/`host01`, `host2`/
   `host02`, … (a legacy `{ name: {…} }` map is still accepted, but a map has no
   guaranteed order — prefer the list).
+- `backendExtended.path` — optional file path (relative to the scenario's
+  `index.json` file) containing the node definitions. When present, rockDemo
+  reads the file at this path and creates the nodes from its content. The file
+  can contain a full object with `{ "nodes": […] }`, or directly an array or map
+  of nodes. This allows backend configurations to be modularized and shared across
+  scenarios.
 - `backendExtended.layout` — optional default `split` for every node after the
   first: `"columns"` (or the legacy `"split"`) → `"right"` (side-by-side);
   `"rows"` → `"down"` (stacked); omit it (the default) for no split. It's a
@@ -241,17 +247,17 @@ prompts for the node rather than one entry per live node.)*
 | `split` | Optional. Splits this node's terminal from the previous node's into its own **pane**. Accepts a direction: `"right"` (a pane **beside**, side-by-side) or `"down"` (a pane **stacked below**). `true` means `"right"`. A node without `split` opens beside as a new column too — the difference is that a `"down"` node stacks under whichever column is current. The first node never splits (nothing precedes it). The `backendExtended.layout` / profile `layout` shorthand sets a default for every node but the first: `"split"`/`"columns"` → `"right"`, `"rows"` → `"down"`. The panes open in the editor area and form a real grid shaped by this direction. |
 | `color` | Optional. Sets the terminal tab / icon color to help identify this node. Accepts standard color names: `"red"`, `"orange"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`, `"magenta"`, `"cyan"`, `"white"`, `"black"`, or any VS Code `ThemeColor` ID (e.g. `"terminal.ansiBrightGreen"`). |
 | `tabname` | Optional. Sets a custom display name for the terminal tab in VS Code, without affecting the node's hostname, container name, or script execution references (which still use `name`). (Can also be specified as `tabName`). |
-| `background` | Optional. A **script file** (path relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
-| `foreground` | Optional. A **script file** (path relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
+| `background` | Optional. A **script file** (path relative to the backend definition folder if using `backendExtended.path`, or relative to the extension's `config/` folder, e.g. `ubuntu/background.sh`) run **detached and hidden** in this node's container when the env starts. Output is captured to `/var/log/rockdemo/<scenario>/<node>_backend_background.log`. |
+| `foreground` | Optional. A **script file** (path relative to the backend definition folder if using `backendExtended.path`, or relative to `config/`, e.g. `ubuntu/startup.sh`) run **visibly** in this node's terminal when the env starts. It **blocks** the player: the intro **START** button stays disabled until every node's backend foreground finishes. |
 
 The node name becomes the container **hostname** (visible in the shell prompt).
 
-> **Backend scripts live under `config/<backend>/`** (e.g.
-> [config/ubuntu/startup.sh](config/ubuntu/startup.sh)) and the `background` /
-> `foreground` value is the file's path relative to `config/`. When a node
-> references one, rockDemo mounts the bundled `config/` folder read-only into the
+> **Backend scripts** live under `config/<backend>/` (e.g.
+> [config/ubuntu/startup.sh](config/ubuntu/startup.sh)) for bundled profiles, or in the
+> same folder as the backend definition file when loaded via `backendExtended.path`. When a node
+> references one, rockDemo mounts the script folder read-only into the
 > container and runs the script **by path** — so there's nothing to copy and the
-> scripts are version-controlled with the extension.
+> scripts run directly in the container.
 >
 > Backend `background`/`foreground` run **once per launch** (and again on
 > **RESTART**), on the intro screen — the moment the env comes up — so they're
