@@ -21,7 +21,7 @@ permissions:
   packages: write # needed to push to GHCR
 
 jobs:
-  build-push:
+  build-base:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,9 +29,6 @@ jobs:
         include:
           - { dir: ubuntu, name: ubuntu }
           - { dir: ubuntu-systemd, name: ubuntu-systemd }
-          # FROM ghcr.io/<owner>/rockdemo/ubuntu-systemd:24.04 — relies on a
-          # previously-published base image (rebuild base first if both change).
-          - { dir: kubernetes-kubeadm-1node, name: kubernetes-kubeadm-1node }
     steps:
       - uses: actions/checkout@v5
 
@@ -48,6 +45,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -55,9 +55,47 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: docker/${{ matrix.dir }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ steps.img.outputs.name }}:24.04
             ${{ steps.img.outputs.name }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # FROM ghcr.io/<owner>/rockdemo/ubuntu-systemd:24.04 — runs after build-base
+  # so both linux/amd64 and linux/arm64 base manifests exist in GHCR.
+  build-k8s:
+    needs: build-base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compute lowercase image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rockdemo/kubernetes-kubeadm-1node" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/kubernetes-kubeadm-1node
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:24.04
+            ${{ steps.img.outputs.name }}:latest
+          cache-from: type=gha,scope=kubernetes-kubeadm-1node
+          cache-to: type=gha,mode=max,scope=kubernetes-kubeadm-1node
