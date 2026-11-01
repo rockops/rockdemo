@@ -23,7 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Build-time tool downloads (not pre-pulled container images — see VERSIONS.md).
 ARG CRICTL_VERSION=v1.33.0
 ARG CNI_PLUGINS_VERSION=v1.5.1
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 # Single source of truth for the Kubernetes + Cilium versions. Edit versions.env,
 # rebuild, done — the apt pins, apt repo minor, control-plane image tags, Cilium
@@ -66,14 +66,16 @@ RUN . /etc/rockdemo-versions.env \
  && rm -rf /var/lib/apt/lists/*
 
 # --- crictl (kubeadm preflight uses it; handy for debugging) ---
-RUN curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz" \
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+ && curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" \
       | tar -C /usr/local/bin -xz \
  && printf 'runtime-endpoint: unix:///run/containerd/containerd.sock\nimage-endpoint: unix:///run/containerd/containerd.sock\n' \
       > /etc/crictl.yaml
 
 # --- CNI plugins into /opt/cni/bin (loopback etc.; Cilium ships its own too) ---
-RUN mkdir -p /opt/cni/bin \
- && curl -fsSL "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-${TARGETARCH}-${CNI_PLUGINS_VERSION}.tgz" \
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+ && mkdir -p /opt/cni/bin \
+ && curl -fsSL "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-${ARCH}-${CNI_PLUGINS_VERSION}.tgz" \
       | tar -C /opt/cni/bin -xz
 
 # --- containerd: enable the CRI plugin and the systemd cgroup driver ---

@@ -5,6 +5,25 @@ const path = require("path");
 const execFile = require("util").promisify(require("child_process").execFile);
 const { execFileSync } = require("child_process");
 
+// Ensure common macOS Docker CLI locations (Apple Silicon Homebrew, Intel
+// Homebrew, Docker Desktop, OrbStack, Rancher Desktop) are on PATH when VS Code
+// is launched from Finder/Dock/Spotlight with a minimal environment.
+if (process.platform === "darwin") {
+  const home = os.homedir();
+  const extraDirs = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/Applications/Docker.app/Contents/Resources/bin",
+    path.join(home, ".orbstack", "bin"),
+    path.join(home, ".rd", "bin"),
+  ];
+  const current = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const d of extraDirs) {
+    if (!current.includes(d)) current.push(d);
+  }
+  process.env.PATH = current.join(path.delimiter);
+}
+
 // Extension install location, set in activate(). Used to resolve vendored
 // webview assets (media/) such as the bundled syntax highlighter.
 let extensionUri = null;
@@ -562,13 +581,15 @@ function startNamedContainer(name, imageid, mounts, cmd, ip, useNet, privileged,
   // finds the host kernel's modules (br_netfilter, overlay, ...) — the modules
   // are global to the shared kernel, this just hands the container the matching
   // .ko files + dep metadata so the raw CNCF kubeadm procedure runs unmodified.
+  const hasHostModules =
+    process.platform === "linux" && fs.existsSync("/lib/modules");
   const priv = privileged
     ? `--privileged --cgroupns=private ` +
       NESTED_CACHE_ROOTS.map(
         (r) =>
           `--mount type=volume,src=${nestedCacheVolumeFor(name, imageid, r.tag)},dst=${r.path},volume-label=${ROCKDEMO_CACHE_LABEL} `
       ).join("") +
-      `-v /lib/modules:/lib/modules:ro `
+      (hasHostModules ? `-v /lib/modules:/lib/modules:ro ` : "")
     : "";
   // Drop any stale container with this name first (e.g. after a hard restart),
   // then run a fresh one with the configured command (defaults to `sh`).
@@ -792,6 +813,13 @@ function resolveNodes(scenario, scenarioDir) {
 let hostCaBundleCache;
 function hostCaBundle() {
   if (hostCaBundleCache !== undefined) return hostCaBundleCache;
+  // On macOS, /etc/ssl/cert.pem is a symlink into /private/etc and does not
+  // contain macOS System Keychain corporate CAs; mounting /etc paths also breaks
+  // on Docker Desktop / VM file-sharing configurations.
+  if (process.platform === "darwin") {
+    hostCaBundleCache = null;
+    return null;
+  }
   const candidates = [
     "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
     "/etc/pki/tls/certs/ca-bundle.crt", // RHEL, Fedora, CentOS
@@ -854,6 +882,16 @@ function resolveMountItem(item, baseFsPath) {
     src = src === "~" ? home : path.join(home, src.slice(2));
   } else if (!path.isAbsolute(src)) {
     src = baseFsPath ? path.resolve(baseFsPath, src) : path.resolve(src);
+  }
+
+  // On macOS, Docker Desktop only shares /Users, /Volumes, /private, /tmp, and
+  // /var/folders by default; Linux system paths like /usr/local/share/ca-certificates
+  // fail `docker run` with "Mounts denied".
+  if (
+    process.platform === "darwin" &&
+    (src.startsWith("/usr/") || src.startsWith("/etc/") || src.startsWith("/lib/"))
+  ) {
+    return null;
   }
 
   try {
