@@ -23,6 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Build-time tool downloads (not pre-pulled container images — see VERSIONS.md).
 ARG CRICTL_VERSION=v1.33.0
 ARG CNI_PLUGINS_VERSION=v1.5.1
+ARG HELM_VERSION=v3.17.1
 ARG TARGETARCH
 
 # Single source of truth for the Kubernetes + Cilium versions. Edit versions.env,
@@ -78,6 +79,12 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
  && curl -fsSL "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-${ARCH}-${CNI_PLUGINS_VERSION}.tgz" \
       | tar -C /opt/cni/bin -xz
 
+# --- Helm ---
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+ && curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+      | tar -C /usr/local/bin -xz --strip-components=1 "linux-${ARCH}/helm" \
+ && chmod +x /usr/local/bin/helm
+
 # --- containerd: enable the CRI plugin and the systemd cgroup driver ---
 # The distro containerd ships with CRI disabled; regenerate the default config,
 # then pin SystemdCgroup=true to match the kubelet's systemd cgroup driver (this
@@ -122,19 +129,20 @@ WORKDIR /root
 # startup.sh has copied the admin kubeconfig here.
 ENV KUBECONFIG=/root/.kube/config
 
-# kubectl bash completion + a `k` alias, wired so completion works for BOTH
+# kubectl and helm bash completion + a `k` alias, wired so completion works for BOTH
 # `kubectl` and `k` (the `complete -F __start_kubectl k` line re-points the alias
 # at kubectl's completion function). Appended to root's .bashrc, sourced by the
 # interactive `docker exec ... bash` shell rockDemo attaches.
 RUN { \
       echo ''; \
-      echo '# rockDemo: kubectl completion + k alias'; \
+      echo '# rockDemo: kubectl and helm completion + k alias'; \
       echo '# kubectl completion needs the bash-completion helpers (e.g.'; \
       echo '# _get_comp_words_by_ref); load them first if not already sourced.'; \
       echo 'if ! type _get_comp_words_by_ref >/dev/null 2>&1; then'; \
       echo '  [ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion'; \
       echo 'fi'; \
       echo 'source <(kubectl completion bash)'; \
+      echo 'source <(helm completion bash)'; \
       echo 'alias k=kubectl'; \
       echo 'complete -o default -F __start_kubectl k'; \
     } >> /root/.bashrc

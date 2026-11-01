@@ -51,7 +51,7 @@ These are separately-versioned artifacts; each has one home:
 | --- | --- | --- |
 | **cilium-envoy** image | `manifests/cilium-cni.yaml` (real tag) | Its release tag isn't equal to the Cilium version and is constant across Cilium **patch** releases. Update it only when bumping the Cilium **minor**. |
 | **local-path** provisioner + `busybox` | `manifests/local-path-storage.yaml` | Replace this file with the upstream manifest for the storage release you want. |
-| **crictl**, **CNI plugins** | `Dockerfile` ARGs (`CRICTL_VERSION`, `CNI_PLUGINS_VERSION`) | Build-time tool downloads (binaries baked into the image), not runtime container images. |
+| **crictl**, **CNI plugins**, **Helm** | `Dockerfile` ARGs (`CRICTL_VERSION`, `CNI_PLUGINS_VERSION`, `HELM_VERSION`) | Build-time tool downloads (binaries baked into the image), not runtime container images. |
 
 ## Recipes
 
