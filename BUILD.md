@@ -198,3 +198,14 @@ This is the **same command CI runs**; it never publishes.
 | **`401`/auth error** at the publish step | `VSCE_PAT` is missing, expired, or scoped to a single org. Recreate it: *Marketplace → Manage* scope, **All accessible organizations**. |
 | Release didn't run at all | The tag didn't match `v*.*.*`, or you pushed the commit without the tag. Push with `--follow-tags`. |
 | Wrong channel (published stable instead of pre-release) | Check the minor's parity — odd = pre-release, even = stable. |
+
+---
+
+## Build images on a branch using the pipeline
+
+Example with branch dev/1.2.14:
+
+```bash
+gh workflow run docker-image.yml --ref dev/1.2.14
+```
+
