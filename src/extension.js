@@ -785,20 +785,83 @@ function resolveBackendExtended(ext, scenarioDir) {
  */
 function resolveNodes(scenario, scenarioDir) {
   const ext = resolveBackendExtended(scenario.backendExtended, scenarioDir);
-  if (ext && ext.nodes) return nodesFromConfig(ext.nodes, ext.layout, ext._backendDir);
+  let baseNodes = [];
+  let layout = undefined;
+  let backendDir = scenarioDir;
 
-  const key = scenario.backend && scenario.backend.imageid;
-  if (key) {
-    const backends = loadBackends();
-    const profile = backends[key];
-    if (profile && profile.nodes) return nodesFromConfig(profile.nodes, profile.layout);
-    vscode.window.showWarningMessage(
-      `rockDemo: unknown backend "${key}" — not a default profile ` +
-        `(${Object.keys(backends).join(", ") || "none"}). ` +
-        `Define it in backendExtended for a custom backend.`
-    );
+  if (ext && ext.nodes) {
+    baseNodes = nodesFromConfig(ext.nodes, ext.layout, ext._backendDir);
+    layout = ext.layout;
+    backendDir = ext._backendDir || scenarioDir;
+  } else {
+    const key = scenario.backend && scenario.backend.imageid;
+    if (key) {
+      const backends = loadBackends();
+      const profile = backends[key];
+      if (profile && profile.nodes) {
+        baseNodes = nodesFromConfig(profile.nodes, profile.layout);
+        layout = profile.layout;
+      } else {
+        vscode.window.showWarningMessage(
+          `rockDemo: unknown backend "${key}" — not a default profile ` +
+            `(${Object.keys(backends).join(", ") || "none"}). ` +
+            `Define it in backendExtended for a custom backend.`
+        );
+      }
+    }
   }
-  return [];
+
+  const rawTerminals =
+    scenario.terminals ||
+    (scenario.backend && scenario.backend.terminals) ||
+    (scenario.backendExtended && scenario.backendExtended.terminals);
+
+  if (rawTerminals) {
+    const termList = Array.isArray(rawTerminals)
+      ? rawTerminals
+      : Object.keys(rawTerminals).map((name) => ({ name, ...rawTerminals[name] }));
+
+    for (let idx = 0; idx < termList.length; idx++) {
+      const t = termList[idx];
+      const primaryNode = baseNodes.find((n) => !n.connect) || baseNodes[0];
+      const connect =
+        t.connect ||
+        t.connection ||
+        t.target ||
+        t.host ||
+        (!t.imageid && primaryNode ? primaryNode.name : null);
+      const name =
+        t.name ||
+        (t.tabname
+          ? t.tabname.toLowerCase().replace(/\s+/g, "-")
+          : `terminal${baseNodes.length + 1}`);
+      const split =
+        t.split !== undefined
+          ? splitDirection(baseNodes.length, layout, t.split)
+          : (baseNodes.length > 0 ? "down" : false);
+      const cmd = t.cmd || (primaryNode && primaryNode.cmd) || "sh";
+
+      baseNodes.push({
+        name,
+        alias: t.alias || null,
+        imageid: t.imageid || null,
+        cmd,
+        ip: t.ip || null,
+        docker: !!(t.docker || t.privileged),
+        systemd: !!t.systemd,
+        background: t.background || null,
+        foreground: t.foreground || null,
+        backendDir: backendDir || null,
+        split,
+        color: t.color || null,
+        tabname: t.tabname || t.tabName || null,
+        mount: t.mount || t.mounts || null,
+        connect,
+      });
+    }
+  }
+
+  return baseNodes;
 }
 
 /**
@@ -2104,16 +2167,61 @@ async function runBackendForeground(entry) {
     const rec = (entry.terminals || []).find((r) => r.name === node.name);
     if (!rec) continue;
 
-    const script = resolveBackendScript(node.foreground, node.backendDir);
     const marker = `/tmp/.rockdemo-fg-backend-${node.name}`;
     const sendKey = "backend:" + node.name;
     const token = "node:" + node.name;
     if (!entry.fgDone) entry.fgDone = new Set();
 
+    if (node.connect) {
+      if (!entry.fgDone.has(sendKey)) {
+        entry.fgDone.add(sendKey);
+        (async () => {
+          if (rec.ready) await rec.ready;
+          if (entry.disposed) return;
+          const targetNode = entry.nodes.find((x, idx2) => nodeMatches(x, idx2, node.connect, entry));
+          const containerName = targetNode ? containerNameFor(targetNode.name) : containerNameFor(node.connect);
+          if (containerName) {
+            for (let i = 0; i < 120; i++) {
+              if (entry.disposed) return;
+              try {
+                await execFile("docker", ["exec", containerName, "true"]);
+                await delay(1000);
+                break;
+              } catch (err) {
+                await delay(1000);
+              }
+            }
+          }
+          if (entry.disposed) return;
+          rec.terminal.sendText(node.foreground, true);
+        })();
+      }
+      continue;
+    }
+
+    const script = resolveBackendScript(node.foreground, node.backendDir);
+
     // A missing script must still release the START gate (the rendered button is
     // gated whenever a node declares a foreground), or START stays stuck. Warn
     // once, then un-gate on every enter so a save-rebuild can't re-stick it.
     if (!script) {
+      const isInlineCommand = /\s|[;&|]/.test(node.foreground.trim()) || !node.foreground.trim().endsWith(".sh");
+      if (isInlineCommand) {
+        if (!entry.fgDone.has(sendKey)) {
+          entry.fgDone.add(sendKey);
+          fgGate(entry, "intro", token);
+          if (rec.ready) await rec.ready;
+          if (entry.disposed) return;
+          rec.terminal.show(true);
+          rec.terminal.sendText(
+            `rm -f ${marker}; ( ${node.foreground} ); touch ${marker}`,
+            true
+          );
+        }
+        pollForegroundDone(entry, rec, marker, "intro", token);
+        continue;
+      }
+
       if (!entry.fgDone.has(sendKey)) {
         entry.fgDone.add(sendKey);
         const targetPath = node.backendDir
@@ -2311,6 +2419,12 @@ function stageRuleInto(assetsRoot, scratchDir, nodeName, rule) {
       } catch (err) {
         /* best-effort — ignore */
       }
+    } else if (rule.chmod === "+w") {
+      try {
+        fs.chmodSync(dst, 0o666);
+      } catch (err) {
+        /* best-effort — ignore */
+      }
     }
     n++;
   }
@@ -2350,13 +2464,33 @@ function stageNodeAssets(entry, node) {
   for (const [target, group] of byTarget) {
     const scratchDir = path.join(entry.baseFsPath, RUN_DIR, safeNode, String(idx++));
     fs.mkdirSync(scratchDir, { recursive: true });
+    try {
+      fs.chmodSync(scratchDir, 0o777);
+    } catch (err) {}
     let staged = 0;
     for (const rule of group) {
       staged += stageRuleInto(assetsRoot, scratchDir, node.name, rule);
     }
     if (!staged) continue;
     const ro = group.every((r) => r.chmod === "+r");
-    mounts.push({ host: scratchDir, container: normalizeContainerPath(target), ro });
+    const containerTarget = normalizeContainerPath(target);
+    if (containerTarget === "/root") {
+      // If the target is /root (or ~/), do not mount the host directory directly over /root.
+      // On macOS (e.g. with Colima / VirtioFS), mounting a host directory over /root replaces
+      // the container's home directory with the host user's folder (denying write access to
+      // the in-container root user and shadowing /root/.bashrc). Instead, bind-mount each
+      // staged file individually into /root.
+      const files = listFiles(scratchDir);
+      for (const rel of files) {
+        mounts.push({
+          host: path.join(scratchDir, rel),
+          container: path.posix.join("/root", rel),
+          ro,
+        });
+      }
+    } else {
+      mounts.push({ host: scratchDir, container: containerTarget, ro });
+    }
   }
   return mounts;
 }
@@ -3835,8 +3969,9 @@ async function buildScenario(jsonDoc, nodes) {
   const scenario = JSON.parse(jsonDoc.getText());
   const details = scenario.details || {};
   // Any node carrying a backend-level foreground gates the intro START button
-  // until it finishes (same as an intro foreground does).
-  const backendFg = (nodes || []).some((n) => n.foreground);
+  // until it finishes (same as an intro foreground does), unless it's a secondary
+  // connection terminal (e.g. running a persistent watch or monitor command).
+  const backendFg = (nodes || []).some((n) => n.foreground && !n.connect);
   // Pseudo-entry for {{TRAFFIC_*}} resolution (findNode only needs `nodes`).
   const ti = { nodes: nodes || [] };
   const stepDefs = details.steps || [];

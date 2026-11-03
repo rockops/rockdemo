@@ -231,6 +231,14 @@ prompts for the node rather than one entry per live node.)*
   (`["10.0.0.0/8", "svc.local"]`) or a comma-separated string. A `backends.json`
   profile may carry `noProxy` too (the Kubernetes profiles set the pod and
   service CIDRs there).
+- `terminals` — optional list of additional secondary/connected terminal panes
+  opened alongside the scenario backend (supports both `backend.imageid` and
+  `backendExtended`). Each terminal entry can specify `name`, `alias`, `tabname`,
+  `color`, `cmd`, `split` (defaults to `"down"` so it opens stacked under the
+  previous terminal), `connect` (defaults to connecting to the primary backend
+  container), and a `foreground` command. Connected terminals execute their
+  `foreground` command inside the container once attached, without blocking the
+  scenario START button.
 
 #### Per-node fields (both `backends.json` profiles and `backendExtended`)
 
